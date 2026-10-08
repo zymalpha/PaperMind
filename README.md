@@ -17,6 +17,7 @@ Copy-Item .env.example .env
 
 ```powershell
 python scripts\verify_api.py
+python scripts\download_reranker.py
 python scripts\index_document.py "D:\papers\paper.pdf"
 streamlit run app.py
 ```
@@ -30,12 +31,12 @@ python scripts\run_agent.py "总结知识库中论文的研究方法" --session-
 ## 第二阶段能力
 
 - 分块策略：固定长度、递归边界、句段语义分块；文档元信息包含来源文件、页码和 chunk ID。
-- 检索模式：`vector`、`hybrid`、`hybrid_rerank`。混合检索由本地 BM25 和手写 RRF 融合；重排使用本地 `BAAI/bge-reranker-base`。首次启用重排需下载模型。加载失败会记录告警并退回混合检索。
+- 检索模式：`vector`、`hybrid`、`hybrid_rerank`。混合检索由本地 BM25 和手写 RRF 融合；重排使用本地 `BAAI/bge-reranker-base`。运行 `scripts\download_reranker.py` 后模型固定保存在 `models/bge-reranker-base/`；加载失败会记录告警并退回混合检索。
 - 索引管理：按内容哈希去重；同名上传文档变化时替换旧索引；支持强制重建、清单查询和删除。
 - RAG：受限上下文、证据引用、SQLite 语义缓存、低相关性与模型失败降级；请求日志保存查询哈希、chunk、耗时和 Token 用量，不记录问题原文或 API Key。
 - Agent：ReAct 多轮调用，JSON Schema 参数校验，最多 8 个已注册工具：知识库检索、论文元信息、论文对比、关键词提取、论文摘要、时间、计算器及可配置联网搜索。支持独立会话、近期记忆、旧轮次摘要、并行调用、超时和重复调用防护。工具执行明细写入 `data/logs/agent_tools.jsonl`，敏感字段及类似 API Key 的字符串会脱敏。
 
-检索模式在 `config.yaml` 的 `retrieval.mode` 配置。默认启用混合检索+重排；如果本机暂时无法下载重排模型，可设为 `hybrid`。本地日志与 SQLite 缓存都位于 `data/`，不会纳入 Git。
+检索模式在 `config.yaml` 的 `retrieval.mode` 配置。默认启用混合检索+重排；如果本机暂时无法安装重排模型，可设为 `hybrid`，但不会静默伪造重排结果。本地日志与 SQLite 缓存都位于 `data/`，模型权重位于 `models/`，课程 Word 材料位于 `course_materials/`，这些目录均不会纳入 Git。
 
 ## 目录
 
@@ -43,7 +44,9 @@ python scripts\run_agent.py "总结知识库中论文的研究方法" --session-
 src/research_assistant/  应用代码
 tests/                   自动化测试
 scripts/                 API 验证、文档索引和 Agent 命令行入口
-docs/                    分阶段开发记录
+docs/                    阶段记录、状态、代码审查和交接文档
+course_materials/        本地课程 Word 材料（忽略）
+models/                  本地模型权重（忽略）
 data/uploads/            本地上传文件（忽略）
 data/index/               Chroma、清单、缓存和 Agent 记忆（忽略）
 data/logs/                请求及工具执行日志（忽略）
@@ -53,4 +56,4 @@ config.yaml              非密钥配置
 
 ## 验证与阶段边界
 
-运行 `pytest -q`、`python -m compileall -q src app.py scripts` 和 `python -m pip check` 验证。第一阶段和第二阶段的记录分别位于 `docs/第一阶段开发记录.md` 与 `docs/第二阶段开发记录.md`。第三阶段界面重构与第四阶段正式评测、报告及 PPT 均尚未开始。
+运行 `pytest -q`、`python -m compileall -q src app.py scripts` 和 `python -m pip check` 验证。长期状态见 `docs/PROJECT_STATUS.md`，交接说明见 `docs/HANDOFF.md`，审查报告见 `docs/第二阶段代码审查报告.md`。第一阶段和第二阶段记录分别位于 `docs/第一阶段开发记录.md` 与 `docs/第二阶段开发记录.md`。第三阶段界面重构与第四阶段正式评测、报告及 PPT 均尚未开始。

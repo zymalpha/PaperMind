@@ -104,7 +104,7 @@ class SemanticChunker(BaseTextChunker):
     """Sentence/paragraph boundary splitter tailored to natural-language papers."""
 
     strategy = "semantic"
-    _boundary = re.compile(r"(?<=[。！？.!?])\s+|\n{2,}")
+    _boundary = re.compile(r"(?<=[。！？.!?])\s*|\n{2,}")
 
     def _split(self, text: str) -> list[str]:
         segments = [segment.strip() for segment in self._boundary.split(text.strip()) if segment.strip()]

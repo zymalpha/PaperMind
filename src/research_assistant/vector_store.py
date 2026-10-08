@@ -88,7 +88,11 @@ class ChromaVectorStore:
     def delete_stale_chunks(self, document_id: str, keep_ids: set[str]) -> None:
         stale = self.existing_chunk_ids(document_id) - keep_ids
         if stale:
-            self._collection.delete(ids=sorted(stale))
+            self.delete_chunks(stale)
+
+    def delete_chunks(self, chunk_ids: set[str]) -> None:
+        if chunk_ids:
+            self._collection.delete(ids=sorted(chunk_ids))
 
     def all_chunks(self, document_id: str | None = None) -> list[Chunk]:
         """Read persisted corpus metadata for local lexical retrieval."""

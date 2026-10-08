@@ -60,7 +60,17 @@ class ResearchAssistantService:
         selected_strategy = strategy or self.settings.chunk_strategy
         chunker = create_chunker(selected_strategy, self.settings.chunk_size, self.settings.chunk_overlap)
         chunks = chunker.split_pages(pages)
-        self.vector_store.upsert(chunks)
+        previous_chunk_ids = self.vector_store.existing_chunk_ids(document_id)
+        try:
+            self.vector_store.upsert(chunks)
+        except Exception:
+            # Chroma upsert is batched, not transactional. Remove only chunks
+            # created by this failed attempt and leave the prior index intact.
+            current_ids = self.vector_store.existing_chunk_ids(document_id)
+            created_ids = current_ids - previous_chunk_ids
+            if created_ids:
+                self.vector_store.delete_chunks(created_ids)
+            raise
         if copy_to_uploads and source.parent != self.settings.upload_dir.resolve():
             try:
                 shutil.copy2(source, target)

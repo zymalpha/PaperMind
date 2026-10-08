@@ -62,20 +62,24 @@ def create_tool_registry(service, rag: RAGEngine, llm: DeepSeekClient, web_enabl
         if not matches:
             raise ToolError("未找到论文；paper_id 可使用文件名或文档 ID 前缀。")
         paper = matches[0]
-        text = "\n".join(c.text for c in service.vector_store.all_chunks(paper.document_id))
-        title = next((line.strip() for line in text.splitlines() if len(line.strip()) > 8), paper.source_name)
-        doi = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, re.I)
-        year = re.search(r"\b(?:19|20)\d{2}\b", text[:5000])
-        authors = next((line.strip() for line in text.splitlines()[1:8] if re.search(r"[A-Z][a-z]+\s+[A-Z]", line)), "未能从文档文本中可靠提取")
-        abstract = re.search(r"(?:abstract|摘要)\s*[:：]?\s*(.{80,1200}?)(?:\n\s*\n|\n(?:keywords|关键词|1\s+introduction)|$)", text, re.I | re.S)
-        return {"document_id": paper.document_id, "file": paper.source_name, "title": title[:300], "authors": authors[:300], "year": year.group(0) if year else None, "doi": doi.group(0).rstrip(".,") if doi else None, "abstract": abstract.group(1).strip() if abstract else "未能可靠提取摘要"}
+        all_chunks = sorted(service.vector_store.all_chunks(paper.document_id), key=lambda item: item.chunk_index)
+        first_page = "\n".join(chunk.text for chunk in all_chunks if chunk.page == 1)
+        text = "\n".join(chunk.text for chunk in all_chunks)
+        title, authors = _extract_front_matter(first_page)
+        # DOI matches from the first page only; scanning references commonly
+        # attributes another paper's DOI to this document.
+        doi = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", first_page, re.I)
+        abstract = re.search(r"(?:abstract|摘要)\s*[:：]?\s*(.{80,1200}?)(?:\n\s*\n|\n(?:keywords|关键词|1\s+introduction)|$)", first_page, re.I | re.S)
+        year = re.search(r"\b(?:19|20)\d{2}\b", first_page)
+        return {"document_id": paper.document_id, "file": paper.source_name, "title": title[:300], "authors": authors[:1000], "year": year.group(0) if year else None, "doi": doi.group(0).rstrip(".,") if doi else None, "abstract": abstract.group(1).strip() if abstract else "未能可靠提取摘要", "metadata_note": "标题/作者来自 PDF 首页启发式提取；年份和 DOI 未能从首页可靠确认时留空。"}
 
     def compare_papers(paper_a: str, paper_b: str) -> dict[str, Any]:
         left, right = paper_info(paper_a), paper_info(paper_b)
         chunks_a = service.vector_store.all_chunks(left["document_id"])
         chunks_b = service.vector_store.all_chunks(right["document_id"])
         return {"paper_a": left, "paper_b": right,
-                "evidence_a": [c.text[:700] for c in chunks_a[:4]], "evidence_b": [c.text[:700] for c in chunks_b[:4]],
+                "evidence_a": [{"source": c.source_name, "page": c.page, "chunk_id": c.id, "text": c.text[:700]} for c in sorted(chunks_a, key=lambda c: c.chunk_index)[:4]],
+                "evidence_b": [{"source": c.source_name, "page": c.page, "chunk_id": c.id, "text": c.text[:700]} for c in sorted(chunks_b, key=lambda c: c.chunk_index)[:4]],
                 "instruction": "只可基于所给证据比较；这是一组原文证据，不是未经验证的结论。"}
 
     def extract_keywords(text: str, limit: int = 12) -> dict[str, Any]:
@@ -140,3 +144,29 @@ def create_tool_registry(service, rag: RAGEngine, llm: DeepSeekClient, web_enabl
     registry.register("calculator", "Safely evaluate basic arithmetic.", _object({"expression": {"type": "string", "minLength": 1, "maxLength": 200}}, ["expression"]), calculate)
     registry.register("web_search", "Search the public web when explicitly enabled in configuration.", _object({"query": {"type": "string", "minLength": 1}, "max_results": {"type": "integer", "minimum": 1, "maximum": 10}}, ["query"]), web_search)
     return registry
+
+
+def _extract_front_matter(first_page: str) -> tuple[str, str]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in first_page.splitlines() if line.strip()]
+    lines = [line for line in lines if not re.search(r"provided proper attribution|hereby grants permission|copyright", line, re.I)]
+    title_lines: list[str] = []
+    author_area: list[str] = []
+    collecting_authors = False
+    for line in lines:
+        if re.match(r"abstract\b", line, re.I):
+            break
+        if not collecting_authors and re.search(r"[∗*†‡⋆]", line):
+            collecting_authors = True
+        if collecting_authors:
+            author_area.append(line)
+        elif len(title_lines) < 4 and not re.search(r"@|\b(?:Google|Facebook|University|Research|Institute)\b|reproduce|tables and figures|scholarly works", line, re.I):
+            title_lines.append(line)
+    title = " ".join(title_lines).strip()
+    if not title:
+        title = "未能从 PDF 首页可靠提取标题"
+    # Common scholarly PDFs mark author names with footnote symbols. Extract
+    # only marked names rather than guessing from arbitrary affiliation lines.
+    name_pattern = re.compile(r"([A-ZÀ-ÖØ-Þ][\wÀ-ž.'’-]+(?:\s+(?:[A-ZÀ-ÖØ-Þ]\.\s+)?[A-ZÀ-ÖØ-Þ][\wÀ-ž.'’-]+){1,3})\s*[∗*†‡⋆]")
+    names = list(dict.fromkeys(match.group(1).strip() for match in name_pattern.finditer(" ".join(author_area))))
+    authors = ", ".join(names) if names else "未能从 PDF 首页可靠提取作者"
+    return title, authors

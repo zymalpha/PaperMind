@@ -6,6 +6,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 /*.docx
+course_materials/*
+!course_materials/.gitkeep
+models/*
+!models/.gitkeep
 .streamlit/secrets.toml
 data/uploads/*
 !data/uploads/.gitkeep

@@ -83,8 +83,11 @@ class DeepSeekClient:
                 )
             except (APIConnectionError, APITimeoutError, RateLimitError, APIStatusError, LLMError) as exc:
                 last_error = exc
-                if attempt < self.max_retries:
+                retryable = not isinstance(exc, APIStatusError) or exc.status_code == 429 or exc.status_code >= 500
+                if attempt < self.max_retries and retryable:
                     time.sleep(min(2**attempt, 4))
+                elif not retryable:
+                    break
         raise self._safe_error(last_error)
 
     def stream_chat(
@@ -115,7 +118,8 @@ class DeepSeekClient:
             except (APIConnectionError, APITimeoutError, RateLimitError, APIStatusError, LLMError) as exc:
                 last_error = exc
                 # Once partial text is visible, automatic retries would duplicate the answer.
-                if emitted or attempt >= self.max_retries:
+                retryable = not isinstance(exc, APIStatusError) or exc.status_code == 429 or exc.status_code >= 500
+                if emitted or attempt >= self.max_retries or not retryable:
                     break
                 time.sleep(min(2**attempt, 4))
         raise self._safe_error(last_error)

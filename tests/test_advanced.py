@@ -111,6 +111,23 @@ def test_tool_catalog_contains_eight_real_tools():
     assert registry.execute("calculator", {"expression": "(19*23)+1"})["result"] == 438
 
 
+def test_repeat_tool_call_is_blocked_before_second_execution(tmp_path: Path):
+    class RepeatingLLM:
+        model = "test"
+        def __init__(self): self.calls = 0
+        def chat(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                return type("R", (), {"tool_calls": [{"id": str(self.calls), "name": "tool", "arguments": "{}"}], "content": "", "usage": {}})()
+            return type("R", (), {"tool_calls": [], "content": "stopped", "usage": {}})()
+    calls = []
+    registry = ToolRegistry()
+    registry.register("tool", "noop", {"type": "object", "properties": {}, "additionalProperties": False}, lambda: calls.append(1) or "ok")
+    result = ResearchAgent(RepeatingLLM(), registry, tmp_path / "memory.sqlite", tmp_path / "tools.jsonl", max_iterations=4).run("go", "repeat")
+    assert len(calls) == 1
+    assert result["tool_trace"][1]["status"] == "blocked"
+
+
 def test_agent_stops_after_iteration_limit(tmp_path: Path):
     class RepeatingLLM:
         model = "test"
@@ -118,11 +135,20 @@ def test_agent_stops_after_iteration_limit(tmp_path: Path):
             return type("R", (), {"tool_calls": [{"id": "same", "name": "tool", "arguments": "{}"}],
                                   "content": "", "usage": {}})()
     registry = ToolRegistry()
-    registry.register("tool", "noop", {"type": "object", "properties": {}, "additionalProperties": False}, lambda: "ok")
+    executions = []
+    registry.register("tool", "noop", {"type": "object", "properties": {}, "additionalProperties": False}, lambda: executions.append("ran") or "ok")
     agent = ResearchAgent(RepeatingLLM(), registry, tmp_path / "m.sqlite", tmp_path / "l.jsonl", max_iterations=2)
     result = agent.run("do it", "limit")
     assert result["iterations"] == 2
     assert "最大工具调用轮数" in result["answer"]
+    assert len(executions) == 1
+    assert result["tool_trace"][1]["status"] == "blocked"
+
+
+def test_chinese_utf8_strings_are_preserved():
+    question = "请计算 123 乘以 456。"
+    assert question.encode("utf-8").decode("utf-8") == question
+    assert "Transformer" in "请从知识库检索 Transformer 论文。"
 
 
 def test_tool_timeout_is_logged_and_api_keys_are_redacted(tmp_path: Path):
