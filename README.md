@@ -49,7 +49,7 @@ course_materials/       课程材料（本地保存，忽略）
 
 ```powershell
 python -m venv .venv
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 cd web
@@ -76,7 +76,7 @@ Windows 推荐运行 `start_web.bat`：脚本会检查 Python/Node、安装前�
 
 ```powershell
 # 终端 1
-$env:PYTHONPATH="$PWD\\src"
+$env:PYTHONPATH="$PWD\src"
 python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
 
 # 终端 2
