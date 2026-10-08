@@ -1,59 +1,110 @@
-# 智能科研助理
+# PaperMind
 
-面向科研论文的本地知识库问答与 ReAct Agent。当前完成第一、二阶段：本地文档解析与向量索引、高级混合检索、可溯源 RAG 生成和多工具 Agent。
+PaperMind 是南京农业大学生产实习项目：面向科研论文的可溯源 RAG + Agent 智能科研助手。论文在本地解析、分块、Embedding 和索引；DeepSeek 负责回答生成与 Agent 决策；回答保留文件名、页码和 chunk 证据。
 
-## 安装与运行
+当前已完成第一、第二阶段，并在第三阶段增加了现代化 React Web 工作台。原有 `app.py` Streamlit 入口仍然保留。
 
-Windows PowerShell：
+## 功能
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+- PDF、DOCX、TXT、Markdown 解析和增量索引
+- 向量检索、BM25 + RRF 混合检索、混合检索 + BGE Reranker
+- 上下文裁剪、引用溯源、语义缓存和低相关性降级
+- ReAct Agent：知识库检索、元信息提取、论文对比、关键词、摘要、时间、计算器、联网搜索八个工具
+- React 对话工作台：流式回答、Markdown/GFM、代码、数学公式、历史会话、复制、停止、深色主题
+- 论文知识库管理：批量上传、进度、索引、重索引、删除
+- 引用来源和 Agent 工具执行轨迹展示
+- FastAPI 健康、设置、会话、文档和 SSE 聊天接口
+
+## 架构
+
+```text
+web/ (React + TypeScript + Vite)
+        │ REST / Server-Sent Events
+server/ (FastAPI 适配层、会话 SQLite、上传安全校验)
+        │
+src/research_assistant/ (已验证的 RAG + Agent 核心)
+  Loader → Chunker → Chroma + BM25/RRF/Reranker → RAG/Agent → DeepSeek
 ```
-
-在 `.env` 中设置自己的 `DEEPSEEK_API_KEY`。密钥仅从环境读取；`.env`、本地索引、上传文件和运行日志均不应提交。默认使用 DeepSeek `deepseek-flash`，Base URL 为 `https://api.deepseek.com`。Embedding 使用本地 `BAAI/bge-small-zh-v1.5`；首次运行需下载模型。联网搜索默认关闭，可在 `.env` 设置 `WEB_SEARCH_ENABLED=true` 后启用。
-
-```powershell
-python scripts\verify_api.py
-python scripts\download_reranker.py
-python scripts\index_document.py "D:\papers\paper.pdf"
-streamlit run app.py
-```
-
-命令行运行 Agent（同一 session ID 可续接会话）：
-
-```powershell
-python scripts\run_agent.py "总结知识库中论文的研究方法" --session-id seminar
-```
-
-## 第二阶段能力
-
-- 分块策略：固定长度、递归边界、句段语义分块；文档元信息包含来源文件、页码和 chunk ID。
-- 检索模式：`vector`、`hybrid`、`hybrid_rerank`。混合检索由本地 BM25 和手写 RRF 融合；重排使用本地 `BAAI/bge-reranker-base`。运行 `scripts\download_reranker.py` 后模型固定保存在 `models/bge-reranker-base/`；加载失败会记录告警并退回混合检索。
-- 索引管理：按内容哈希去重；同名上传文档变化时替换旧索引；支持强制重建、清单查询和删除。
-- RAG：受限上下文、证据引用、SQLite 语义缓存、低相关性与模型失败降级；请求日志保存查询哈希、chunk、耗时和 Token 用量，不记录问题原文或 API Key。
-- Agent：ReAct 多轮调用，JSON Schema 参数校验，最多 8 个已注册工具：知识库检索、论文元信息、论文对比、关键词提取、论文摘要、时间、计算器及可配置联网搜索。支持独立会话、近期记忆、旧轮次摘要、并行调用、超时和重复调用防护。工具执行明细写入 `data/logs/agent_tools.jsonl`，敏感字段及类似 API Key 的字符串会脱敏。
-
-检索模式在 `config.yaml` 的 `retrieval.mode` 配置。默认启用混合检索+重排；如果本机暂时无法安装重排模型，可设为 `hybrid`，但不会静默伪造重排结果。本地日志与 SQLite 缓存都位于 `data/`，模型权重位于 `models/`，课程 Word 材料位于 `course_materials/`，这些目录均不会纳入 Git。
 
 ## 目录
 
 ```text
-src/research_assistant/  应用代码
-tests/                   自动化测试
-scripts/                 API 验证、文档索引和 Agent 命令行入口
-docs/                    阶段记录、状态、代码审查和交接文档
-course_materials/        本地课程 Word 材料（忽略）
-models/                  本地模型权重（忽略）
-data/uploads/            本地上传文件（忽略）
-data/index/               Chroma、清单、缓存和 Agent 记忆（忽略）
-data/logs/                请求及工具执行日志（忽略）
-app.py                   现有 Streamlit 启动入口
-config.yaml              非密钥配置
+web/                    React 前端
+server/                 FastAPI 接口层和 Web 会话存储
+src/research_assistant/ RAG、Agent、工具和模型调用核心
+tests/                  Python 单元/API 测试
+scripts/                API、模型、索引和 Agent 验证脚本
+docs/                   开发记录、状态、交接和审查报告
+app.py                  原 Streamlit 入口（保留）
+start_web.bat           Windows 一键启动
+stop_web.bat            Windows 停止服务
+data/                   本地上传、索引、缓存、日志（忽略）
+models/                 本地 Embedding/Reranker 权重（忽略）
+course_materials/       课程材料（本地保存，忽略）
 ```
 
-## 验证与阶段边界
+## 安装与配置
 
-运行 `pytest -q`、`python -m compileall -q src app.py scripts` 和 `python -m pip check` 验证。长期状态见 `docs/PROJECT_STATUS.md`，交接说明见 `docs/HANDOFF.md`，审查报告见 `docs/第二阶段代码审查报告.md`。第一阶段和第二阶段记录分别位于 `docs/第一阶段开发记录.md` 与 `docs/第二阶段开发记录.md`。第三阶段界面重构与第四阶段正式评测、报告及 PPT 均尚未开始。
+需要 Python 3.11+、Node.js 18+ 和 npm。
+
+```powershell
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+cd web
+npm install
+cd ..
+```
+
+在 `.env` 中设置真实密钥（只保存在本机）：
+
+```dotenv
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+WEB_SEARCH_ENABLED=false
+```
+
+默认本地模型为 `BAAI/bge-small-zh-v1.5` 和 `BAAI/bge-reranker-base`。Reranker 权重固定放在 `models/bge-reranker-base/`，可运行 `python scripts/download_reranker.py` 下载；权重不会提交到 Git。
+
+## 启动
+
+Windows 推荐运行 `start_web.bat`：脚本会检查 Python/Node、安装前端依赖、启动 FastAPI（`http://127.0.0.1:8000`）、启动 Vite（`http://127.0.0.1:5173`）并打开浏览器。关闭时运行 `stop_web.bat`。
+
+手动启动：
+
+```powershell
+# 终端 1
+$env:PYTHONPATH="$PWD\\src"
+python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
+
+# 终端 2
+cd web
+npm run dev
+```
+
+保留的 Streamlit 入口：`streamlit run app.py`。
+
+## API 速览
+
+- `GET /api/health`、`GET/PATCH /api/settings`
+- `GET/POST /api/sessions`、`GET/PATCH/DELETE /api/sessions/{id}`
+- `POST /api/chat/stream`：SSE 事件 `session/token/citations/tool/final/error/done`
+- `GET /api/documents`、`POST /api/documents/upload`
+- `POST /api/documents/{id}/reindex`、`DELETE /api/documents/{id}`
+
+前端不会直接访问 DeepSeek。API Key 不会返回浏览器，也不会写入日志。
+
+## 测试
+
+```powershell
+pytest -q
+python -m compileall -q src server app.py scripts
+python -m pip check
+cd web; npm run build
+```
+
+最近一次本地结果：Python 测试 `19 passed`，前端 Vite production build 通过。真实 DeepSeek 生成和真实论文上传需要在配置本地密钥与模型后执行，避免测试阶段产生无意义费用。
+
+阶段状态、限制和后续计划见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，接手流程见 [docs/HANDOFF.md](docs/HANDOFF.md)。

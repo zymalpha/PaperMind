@@ -17,3 +17,12 @@ data/index/*
 !data/index/.gitkeep
 data/logs/*
 !data/logs/.gitkeep
+data/papers/**/*.pdf
+data/papers/**/*.pdf.part
+data/papers/.download_state.json
+data/papers/*
+!data/papers/.gitkeep
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+*.log
