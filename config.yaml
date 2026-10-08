@@ -1,0 +1,27 @@
+app:
+  name: "智能科研助理"
+  data_dir: data
+
+llm:
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-flash"
+  timeout_seconds: 45
+  max_retries: 2
+  temperature: 0.2
+  # deepseek-flash consumes part of this budget for reasoning tokens.
+  max_tokens: 4096
+
+embedding:
+  provider: "local"
+  model: "BAAI/bge-small-zh-v1.5"
+  device: "cpu"
+  batch_size: 32
+
+chunking:
+  chunk_size: 700
+  chunk_overlap: 120
+
+retrieval:
+  top_k: 5
+  collection_name: "research_papers"
+  min_relevance: 0.12
