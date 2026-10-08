@@ -18,10 +18,30 @@ embedding:
   batch_size: 32
 
 chunking:
+  strategy: "recursive"
   chunk_size: 700
   chunk_overlap: 120
 
 retrieval:
+  mode: "hybrid_rerank"
   top_k: 5
+  candidate_k: 20
   collection_name: "research_papers"
   min_relevance: 0.12
+  rrf_k: 60
+  reranker_enabled: true
+  reranker_model: "BAAI/bge-reranker-base"
+  reranker_device: "cpu"
+
+generation:
+  max_context_chars: 14000
+  semantic_cache_enabled: true
+  semantic_cache_threshold: 0.96
+
+agent:
+  max_iterations: 6
+  memory_max_chars: 12000
+  memory_recent_turns: 8
+  tool_timeout_seconds: 12
+  web_search_enabled: false
+  max_parallel_tools: 3

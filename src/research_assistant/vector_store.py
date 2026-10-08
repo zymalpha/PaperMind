@@ -85,3 +85,27 @@ class ChromaVectorStore:
         result = self._collection.get(where={"document_id": document_id}, include=[])
         return {str(value) for value in result.get("ids", [])}
 
+    def delete_stale_chunks(self, document_id: str, keep_ids: set[str]) -> None:
+        stale = self.existing_chunk_ids(document_id) - keep_ids
+        if stale:
+            self._collection.delete(ids=sorted(stale))
+
+    def all_chunks(self, document_id: str | None = None) -> list[Chunk]:
+        """Read persisted corpus metadata for local lexical retrieval."""
+        result = self._collection.get(
+            where={"document_id": document_id} if document_id else None,
+            include=["documents", "metadatas"],
+        )
+        chunks: list[Chunk] = []
+        for chunk_id, content, metadata in zip(
+            result.get("ids", []), result.get("documents", []), result.get("metadatas", []), strict=True
+        ):
+            meta = metadata or {}
+            known = {"document_id", "source_path", "source_name", "page", "chunk_index"}
+            chunks.append(Chunk(
+                id=str(chunk_id), text=str(content or ""), document_id=str(meta.get("document_id", "")),
+                source_path=str(meta.get("source_path", "")), source_name=str(meta.get("source_name", "")),
+                page=int(meta.get("page", 1)), chunk_index=int(meta.get("chunk_index", 0)),
+                metadata={key: value for key, value in meta.items() if key not in known},
+            ))
+        return chunks

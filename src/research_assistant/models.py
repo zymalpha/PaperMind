@@ -75,8 +75,8 @@ class IndexedDocument:
     source_path: str
     chunk_count: int
     indexed_at: str
+    chunk_strategy: str = "recursive"
 
     @property
     def path(self) -> Path:
         return Path(self.source_path)
-

@@ -1,8 +1,8 @@
 # 智能科研助理
 
-基于 RAG + Agent 的论文知识库问答系统。当前完成第一阶段：文档导入、分块、本地 Embedding、Chroma 持久化、Top-K 检索、DeepSeek RAG 生成与引用溯源。
+面向科研论文的本地知识库问答与 ReAct Agent。当前完成第一、二阶段：本地文档解析与向量索引、高级混合检索、可溯源 RAG 生成和多工具 Agent。
 
-## 快速开始
+## 安装与运行
 
 Windows PowerShell：
 
@@ -10,38 +10,47 @@ Windows PowerShell：
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-复制 `.env.example` 为 `.env`，配置 `DEEPSEEK_API_KEY`。本项目的 `.env` 已被 `.gitignore` 忽略，不应提交。本地 Embedding 默认使用 `BAAI/bge-small-zh-v1.5`，首次运行会由 `sentence-transformers` 下载模型到用户缓存。
+在 `.env` 中设置自己的 `DEEPSEEK_API_KEY`。密钥仅从环境读取；`.env`、本地索引、上传文件和运行日志均不应提交。默认使用 DeepSeek `deepseek-flash`，Base URL 为 `https://api.deepseek.com`。Embedding 使用本地 `BAAI/bge-small-zh-v1.5`；首次运行需下载模型。联网搜索默认关闭，可在 `.env` 设置 `WEB_SEARCH_ENABLED=true` 后启用。
 
 ```powershell
 python scripts\verify_api.py
+python scripts\index_document.py "D:\papers\paper.pdf"
 streamlit run app.py
 ```
 
-也可以先用命令行建立索引：
+命令行运行 Agent（同一 session ID 可续接会话）：
 
 ```powershell
-python scripts\index_document.py "D:\path\to\paper.pdf"
+python scripts\run_agent.py "总结知识库中论文的研究方法" --session-id seminar
 ```
 
-## 第一阶段实现
+## 第二阶段能力
 
-- `loaders.py`：PDF（PyMuPDF）、DOCX（python-docx）、TXT/Markdown 加载，保留文档、页码和路径元数据。
-- `chunking.py`：页码感知的递归字符分块，可配置 `chunk_size` 与 `chunk_overlap`。
-- `embeddings.py`：本地 SentenceTransformer 适配器，不将文档送往远程 Embedding API。
-- `vector_store.py`：Chroma PersistentClient，以文档哈希与 Chunk ID 实现可重复导入。
-- `llm.py`：OpenAI 兼容 DeepSeek 客户端，支持非流式/流式、`tools/tool_choice`、重试、超时与异常降级。
-- `rag.py`：检索、动态上下文、相关度阈值、引用溯源和空结果处理。
+- 分块策略：固定长度、递归边界、句段语义分块；文档元信息包含来源文件、页码和 chunk ID。
+- 检索模式：`vector`、`hybrid`、`hybrid_rerank`。混合检索由本地 BM25 和手写 RRF 融合；重排使用本地 `BAAI/bge-reranker-base`。首次启用重排需下载模型。加载失败会记录告警并退回混合检索。
+- 索引管理：按内容哈希去重；同名上传文档变化时替换旧索引；支持强制重建、清单查询和删除。
+- RAG：受限上下文、证据引用、SQLite 语义缓存、低相关性与模型失败降级；请求日志保存查询哈希、chunk、耗时和 Token 用量，不记录问题原文或 API Key。
+- Agent：ReAct 多轮调用，JSON Schema 参数校验，最多 8 个已注册工具：知识库检索、论文元信息、论文对比、关键词提取、论文摘要、时间、计算器及可配置联网搜索。支持独立会话、近期记忆、旧轮次摘要、并行调用、超时和重复调用防护。工具执行明细写入 `data/logs/agent_tools.jsonl`，敏感字段及类似 API Key 的字符串会脱敏。
 
-## 配置与隐私
+检索模式在 `config.yaml` 的 `retrieval.mode` 配置。默认启用混合检索+重排；如果本机暂时无法下载重排模型，可设为 `hybrid`。本地日志与 SQLite 缓存都位于 `data/`，不会纳入 Git。
 
-DeepSeek 只接收用于生成回答的检索上下文；原始文档、Embedding 与 Chroma 索引在本地处理。使用云端模型时请根据你的合规要求判断是否可以传输文档片段。日志和终端输出不会打印 API Key。
+## 目录
 
-## 第一阶段开发记录
+```text
+src/research_assistant/  应用代码
+tests/                   自动化测试
+scripts/                 API 验证、文档索引和 Agent 命令行入口
+docs/                    分阶段开发记录
+data/uploads/            本地上传文件（忽略）
+data/index/               Chroma、清单、缓存和 Agent 记忆（忽略）
+data/logs/                请求及工具执行日志（忽略）
+app.py                   现有 Streamlit 启动入口
+config.yaml              非密钥配置
+```
 
-1. 已读取《南京农业大学课程实践》和《项目交付模板》，按模块一与模块二的第一阶段范围实现。
-2. Python 3.12.7 环境已检查，DeepSeek `deepseek-flash` 最小请求已成功返回有效模型标识。
-3. 完成多格式加载、递归分块、本地 Embedding、Chroma 持久化、Top-K 检索和 DeepSeek RAG 生成。
-4. Chroma 使用 `1.5.9`；旧版 `0.6.x` 在当前 Windows + Python 3.12 需要本地 MSVC 编译 `chroma-hnswlib`，因此转用包含预编译轮子的新版。
-5. 仍未实现第二阶段的 BM25、RRF、Reranker 和 ReAct Agent；也未进行第四阶段的正式评测集。
+## 验证与阶段边界
+
+运行 `pytest -q`、`python -m compileall -q src app.py scripts` 和 `python -m pip check` 验证。第一阶段和第二阶段的记录分别位于 `docs/第一阶段开发记录.md` 与 `docs/第二阶段开发记录.md`。第三阶段界面重构与第四阶段正式评测、报告及 PPT 均尚未开始。

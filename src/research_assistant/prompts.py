@@ -6,6 +6,7 @@ RAG_SYSTEM_PROMPT = """你是严谨的智能科研助理。你只能依据用户
 3. 保留论文中的关键术语、数值、单位和限定条件。
 4. 回答使用中文 Markdown，先直接回答，再按需要给出要点。
 5. 不要虚构文献、作者、实验数据或页码。
+6. 引用编号必须对应下方同编号的文档片段；不要重排引用编号。
 """
 
 
@@ -21,4 +22,3 @@ def build_rag_messages(question: str, contexts: list[str]) -> list[dict[str, str
         {"role": "system", "content": RAG_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
-

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from html import escape
 from pathlib import Path
 
@@ -84,8 +83,6 @@ with st.sidebar:
         for index, upload in enumerate(uploads or [], start=1):
             safe_name = Path(upload.name).name
             target = settings.upload_dir / safe_name
-            if target.exists():
-                target = settings.upload_dir / f"{target.stem}_{int(time.time())}{target.suffix}"
             target.write_bytes(upload.getbuffer())
             progress.progress((index - 1) / len(uploads), text=f"正在索引 {safe_name}")
             try:

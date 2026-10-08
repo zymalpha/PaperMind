@@ -37,9 +37,25 @@ class Settings:
     embedding_batch_size: int
     chunk_size: int
     chunk_overlap: int
+    chunk_strategy: str
     top_k: int
+    candidate_k: int
     collection_name: str
     min_relevance: float
+    retrieval_mode: str
+    rrf_k: int
+    reranker_enabled: bool
+    reranker_model: str
+    reranker_device: str
+    max_context_chars: int
+    semantic_cache_enabled: bool
+    semantic_cache_threshold: float
+    agent_max_iterations: int
+    memory_max_chars: int
+    memory_recent_turns: int
+    tool_timeout_seconds: float
+    web_search_enabled: bool
+    max_parallel_tools: int
 
     def ensure_directories(self) -> None:
         for directory in (self.data_dir, self.upload_dir, self.index_dir, self.log_dir):
@@ -77,9 +93,25 @@ def load_settings(config_path: Path | None = None) -> Settings:
         embedding_batch_size=int(_nested(data, "embedding", "batch_size", 32)),
         chunk_size=int(_nested(data, "chunking", "chunk_size", 700)),
         chunk_overlap=int(_nested(data, "chunking", "chunk_overlap", 120)),
+        chunk_strategy=os.getenv("CHUNK_STRATEGY", str(_nested(data, "chunking", "strategy", "recursive"))),
         top_k=int(_nested(data, "retrieval", "top_k", 5)),
+        candidate_k=int(_nested(data, "retrieval", "candidate_k", 20)),
         collection_name=str(_nested(data, "retrieval", "collection_name", "research_papers")),
         min_relevance=float(_nested(data, "retrieval", "min_relevance", 0.12)),
+        retrieval_mode=str(_nested(data, "retrieval", "mode", "hybrid_rerank")),
+        rrf_k=int(_nested(data, "retrieval", "rrf_k", 60)),
+        reranker_enabled=bool(_nested(data, "retrieval", "reranker_enabled", True)),
+        reranker_model=str(_nested(data, "retrieval", "reranker_model", "BAAI/bge-reranker-base")),
+        reranker_device=str(_nested(data, "retrieval", "reranker_device", "cpu")),
+        max_context_chars=int(_nested(data, "generation", "max_context_chars", 14000)),
+        semantic_cache_enabled=bool(_nested(data, "generation", "semantic_cache_enabled", True)),
+        semantic_cache_threshold=float(_nested(data, "generation", "semantic_cache_threshold", 0.96)),
+        agent_max_iterations=int(_nested(data, "agent", "max_iterations", 6)),
+        memory_max_chars=int(_nested(data, "agent", "memory_max_chars", 12000)),
+        memory_recent_turns=int(_nested(data, "agent", "memory_recent_turns", 8)),
+        tool_timeout_seconds=float(_nested(data, "agent", "tool_timeout_seconds", 12)),
+        web_search_enabled=os.getenv("WEB_SEARCH_ENABLED", str(_nested(data, "agent", "web_search_enabled", False))).lower() in {"1", "true", "yes"},
+        max_parallel_tools=int(_nested(data, "agent", "max_parallel_tools", 3)),
     )
     if settings.chunk_overlap >= settings.chunk_size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
