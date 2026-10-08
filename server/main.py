@@ -12,14 +12,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from research_assistant.config import Settings, load_settings
+from research_assistant.document_store import DocumentManifest
 from research_assistant.service import ResearchAssistantService
 
 from .storage import ConversationStore
@@ -85,6 +87,13 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> Any:
+    fields = [{"field": ".".join(str(part) for part in error["loc"]), "message": error["msg"]}
+              for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": {"error": "请求参数无效", "fields": fields}})
+
+
 def _error(status: int, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"error": message})
 
@@ -100,6 +109,25 @@ def _citation_dict(citation: Any) -> dict[str, Any]:
     }
 
 
+def _agent_citations(tool_trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for trace in tool_trace:
+        if trace.get("tool") != "knowledge_search" or not trace.get("ok"):
+            continue
+        result = trace.get("result") or {}
+        items = result.get("results", []) if isinstance(result, dict) else []
+        for item in items:
+            chunk_id = str(item.get("chunk_id", ""))
+            if not chunk_id or chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            citations.append({"index": len(citations) + 1, "source_name": item.get("source", ""),
+                              "page": item.get("page", 1), "chunk_id": chunk_id,
+                              "score": item.get("score", 0), "excerpt": item.get("text", "")[:240]})
+    return citations
+
+
 def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
@@ -107,12 +135,15 @@ def _sse(event: str, data: Any) -> str:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     settings, service = state.settings, state._service
+    reranker = getattr(service, "_reranker", None) if service else None
+    reranker_loaded = getattr(reranker, "_instance", None) is not None
     return {
         "status": "ok", "app": settings.app_name, "model": settings.llm_model,
         "llm_configured": settings.llm_configured, "service_initialized": service is not None,
         "vector_store": {"status": "ready" if service else "not_initialized", "count": service.vector_store.count if service else None},
-        "embedding": {"model": settings.embedding_model, "status": "configured"},
-        "reranker": {"model": settings.reranker_model, "status": "configured" if settings.reranker_enabled else "disabled"},
+        "embedding": {"model": settings.embedding_model, "status": "loaded" if service else "configured_not_loaded"},
+        "reranker": {"model": settings.reranker_model,
+                     "status": "loaded" if reranker_loaded else "enabled_not_loaded" if settings.reranker_enabled else "disabled"},
     }
 
 
@@ -166,14 +197,14 @@ def delete_session(session_id: str) -> dict[str, Any]:
 
 @app.get("/api/documents")
 def list_documents() -> dict[str, Any]:
-    service = state.service()
-    docs = service.list_documents()
+    manifest = DocumentManifest(state.settings.index_dir / "documents.json")
+    docs = sorted(manifest.list(), key=lambda item: item.indexed_at, reverse=True)
     return {"documents": [{"document_id": doc.document_id, "source_name": doc.source_name, "chunk_count": doc.chunk_count,
                             "indexed_at": doc.indexed_at, "chunk_strategy": doc.chunk_strategy, "status": "indexed"} for doc in docs], "count": len(docs)}
 
 
 def _safe_upload_name(filename: str | None) -> str:
-    name = Path(filename or "upload").name
+    name = Path((filename or "upload").replace("\\", "/")).name
     if Path(name).suffix.lower() not in ALLOWED_EXTENSIONS or not name:
         raise _error(400, "仅支持 PDF、DOCX、TXT 和 Markdown 文件")
     return name
@@ -181,6 +212,8 @@ def _safe_upload_name(filename: str | None) -> str:
 
 @app.post("/api/documents/upload")
 async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    if len(files) > 20:
+        raise _error(413, "单次最多上传 20 个文件")
     service = state.service()
     results: list[dict[str, Any]] = []
     for upload in files:
@@ -195,6 +228,10 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                         raise _error(413, f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 限制")
                     handle.write(chunk)
             document, created = await run_in_threadpool(service.index_file, target, False)
+            if not created:
+                existing = service.manifest.get(document.document_id)
+                if existing and Path(existing.source_path).resolve() != target.resolve() and target.exists():
+                    target.unlink()
             results.append({"ok": True, "created": created, "document": {"document_id": document.document_id,
                              "source_name": document.source_name, "chunk_count": document.chunk_count,
                              "indexed_at": document.indexed_at, "chunk_strategy": document.chunk_strategy, "status": "indexed"}})
@@ -233,10 +270,17 @@ def delete_document(document_id: str) -> dict[str, Any]:
 
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
-    session = state.conversations.ensure(payload.session_id)
+    try:
+        session = state.conversations.ensure(payload.session_id)
+    except KeyError:
+        raise _error(404, "会话不存在") from None
     session_id = session["session_id"]
+    prior_messages = state.conversations.messages(session_id)
+    if not prior_messages and session["title"] == "新对话":
+        state.conversations.rename(session_id, payload.question.strip()[:36])
     state.conversations.add_message(session_id, "user", payload.question)
     events: queue.Queue[tuple[str, Any] | None] = queue.Queue()
+    cancel_event = threading.Event()
     started = time.perf_counter()
 
     def worker() -> None:
@@ -245,16 +289,18 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
             events.put(("session", {"session_id": session_id}))
             if payload.use_agent:
                 result = service.create_agent().run(payload.question, session_id=session_id)
+                citations = _agent_citations(result.get("tool_trace", []))
                 for trace in result.get("tool_trace", []):
                     events.put(("tool", trace))
-                state.conversations.add_message(session_id, "assistant", result["answer"], tools=result.get("tool_trace", []))
-                events.put(("final", {"answer": result["answer"], "citations": [], "tools": result.get("tool_trace", []),
+                state.conversations.add_message(session_id, "assistant", result["answer"], citations=citations, tools=result.get("tool_trace", []))
+                events.put(("final", {"answer": result["answer"], "citations": citations, "tools": result.get("tool_trace", []),
                                       "usage": result.get("usage", {}), "elapsed_ms": round((time.perf_counter() - started) * 1000)}))
             else:
                 engine = service.create_rag_engine()
                 if payload.retrieval_mode:
                     engine.retrieval_mode = payload.retrieval_mode
-                stream, citations = engine.stream_answer(payload.question, payload.document_id)
+                history = [{"role": item["role"], "content": item["content"]} for item in prior_messages]
+                stream, citations = engine.stream_answer(payload.question, payload.document_id, history, cancel_event)
                 citation_data = [_citation_dict(item) for item in citations]
                 events.put(("citations", citation_data))
                 pieces: list[str] = []
@@ -273,19 +319,25 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
     threading.Thread(target=worker, daemon=True).start()
 
     async def generate():
-        yield _sse("session", {"session_id": session_id})
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                item = await asyncio.to_thread(events.get, True, 0.25)
-            except queue.Empty:
-                continue
-            if item is None:
-                yield _sse("done", {"session_id": session_id})
-                break
-            event, data = item
-            yield _sse(event, data)
+        completed = False
+        try:
+            yield _sse("session", {"session_id": session_id})
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.to_thread(events.get, True, 0.25)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    completed = True
+                    yield _sse("done", {"session_id": session_id})
+                    break
+                event, data = item
+                yield _sse(event, data)
+        finally:
+            if not completed:
+                cancel_event.set()
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

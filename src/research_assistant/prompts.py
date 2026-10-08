@@ -11,7 +11,11 @@ RAG_SYSTEM_PROMPT = """你是严谨的智能科研助理。你只能依据用户
 """
 
 
-def build_rag_messages(question: str, contexts: list[str]) -> list[dict[str, str]]:
+def build_rag_messages(
+    question: str,
+    contexts: list[str],
+    conversation_history: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
     context_text = "\n\n".join(contexts)
     user_prompt = f"""检索上下文：
 {context_text}
@@ -19,7 +23,16 @@ def build_rag_messages(question: str, contexts: list[str]) -> list[dict[str, str
 用户问题：{question}
 
 请基于检索上下文回答，并在相关结论后标注来源编号。"""
-    return [
-        {"role": "system", "content": RAG_SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
+    visible_history = [
+        {"role": item["role"], "content": item["content"][:4000]}
+        for item in (conversation_history or [])
+        if item.get("role") in {"user", "assistant"} and item.get("content", "").strip()
     ]
+    history: list[dict[str, str]] = []
+    budget = 12000
+    for item in reversed(visible_history[-12:]):
+        if len(item["content"]) <= budget:
+            history.append(item)
+            budget -= len(item["content"])
+    history.reverse()
+    return [{"role": "system", "content": RAG_SYSTEM_PROMPT}, *history, {"role": "user", "content": user_prompt}]

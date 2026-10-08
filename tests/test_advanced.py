@@ -18,6 +18,7 @@ from research_assistant.rag import RAGEngine  # noqa: E402
 from research_assistant.retrieval import BM25Retriever, HybridRetriever, reciprocal_rank_fusion  # noqa: E402
 from research_assistant.tools import ToolRegistry  # noqa: E402
 from research_assistant.tools import create_tool_registry  # noqa: E402
+from research_assistant.prompts import build_rag_messages  # noqa: E402
 
 
 def chunk(identifier: str, content: str) -> Chunk:
@@ -58,6 +59,15 @@ def test_context_limit_does_not_cite_omitted_chunks():
     assert bounded
     contexts = RAGEngine._contexts(bounded, 60)
     assert sum(map(len, contexts)) <= 60
+
+
+def test_rag_prompt_includes_bounded_visible_history_only():
+    history = [
+        {"role": "user", "content": f"question-{index}"} for index in range(15)
+    ] + [{"role": "tool", "content": "must not be forwarded"}]
+    messages = build_rag_messages("current", ["[1] evidence"], history)
+    assert [item["content"] for item in messages[1:-1]] == [f"question-{index}" for index in range(3, 15)]
+    assert all(item["role"] != "tool" for item in messages)
 
 
 def test_hybrid_rerank_without_configured_model_is_explicit_fallback():

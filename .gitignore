@@ -22,6 +22,7 @@ data/papers/**/*.pdf.part
 data/papers/.download_state.json
 data/papers/*
 !data/papers/.gitkeep
+data/papers_test_index/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo

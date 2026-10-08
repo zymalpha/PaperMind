@@ -2,7 +2,7 @@
 
 更新时间：2026-10-08
 当前阶段：第三阶段（Web 前端与系统集成）
-最近一次本地提交：`1246891 feat: add PaperMind web workspace and FastAPI integration`
+最近一次本地提交：本轮第三阶段补充验收提交（以 `git log -1 --oneline` 为准）。
 
 ## 阶段总览
 
@@ -29,18 +29,20 @@
 
 ### 已验证
 
-- Python 自动化测试：`19 passed`（包括 FastAPI 健康/会话生命周期和 SSE 持久化测试）。
+- Python 自动化测试：`22 passed`（包括 FastAPI 健康/会话生命周期、多轮 SSE、Agent 工具引用和持久化测试）。
 - `python -m compileall -q src server app.py scripts`：通过。
 - `python -m pip check`：通过（依赖安装后执行）。
 - `web/npm run build`：通过，Vite production bundle 生成成功。
+- `web/npm audit --omit=dev`：通过，0 vulnerabilities；KaTeX 插件依赖已通过 npm overrides 统一到 0.19.0。
 - TestClient 验证 `GET /api/health`、`GET /api/settings`、会话 CRUD 和模拟 SSE 引用持久化。
 - 服务配置确认：DeepSeek `deepseek-flash`、`https://api.deepseek.com`；API Key 仅在本地 `.env`。
 
 ### 未验证/限制
 
 - 本轮没有重复消耗 DeepSeek 费用做完整真实生成回归；需要用户在本机启动服务后进行一次真实论文问答验收。
-- Agent SSE 会在 Agent 同步循环完成后发送工具轨迹；RAG token 是实时发送的。底层 `ResearchAgent.run()` 仍是同步 API，浏览器断开时无法强制终止已经发出的单次 DeepSeek 请求。
+- Agent SSE 会在 Agent 同步循环完成后发送工具轨迹；RAG token 是实时发送的，客户端断开会关闭 RAG 上游流。底层 `ResearchAgent.run()` 仍是同步 API，Agent 请求目前不能真正取消。
 - 当前未加入浏览器自动化（Playwright/Selenium）截图验收；已完成前端 production build 和 API 级验证。
+- 本轮未完成浏览器实际交互和真实论文 + DeepSeek 流式问答端到端验收；自动化测试使用隔离的 fake engine，不产生模型费用。
 - Web 会话 SQLite 与 Agent memory 分开存储，删除 Web 会话不会清理 Agent memory 历史文件中的同名 session。
 - 真实本地模型加载依赖 `models/` 和 Hugging Face 缓存；缺失时服务会返回明确错误，不会伪造 Reranker 结果。
 
@@ -49,7 +51,7 @@
 1. 完善可取消的异步 Agent 执行器，并让工具事件在执行过程中实时推送。
 2. 为文档任务增加后台队列和进度查询，避免超大 PDF 占用请求线程。
 3. 增加受控文档预览接口和更细粒度的用户权限（当前仅本机 CORS）。
-4. 进一步拆分前端 bundle（当前 KaTeX/Markdown 使产物大于 Vite 默认警告阈值）。
+4. 进一步拆分前端 bundle（当前约 791 KB，KaTeX/Markdown 使产物大于 Vite 默认警告阈值）。
 
 ## 后续计划
 

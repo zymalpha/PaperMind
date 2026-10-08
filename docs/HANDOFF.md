@@ -42,7 +42,7 @@ src/research_assistant/service.py
 
 - 第一、二阶段功能已验证，第三阶段 API 和前端基础功能已实现。
 - API Key 不由任何接口返回；日志只写哈希、chunk、耗时、工具摘要。
-- RAG SSE token 实时发送；Agent 目前是同步循环，工具轨迹在循环完成后推送，这是已知限制。
+- RAG SSE token 实时发送，浏览器断连会关闭上游流；Agent 目前是同步循环，工具轨迹在循环完成后推送且不能由浏览器取消，这是已知限制。
 - `PATCH /api/settings` 只允许 `retrieval_mode`、`top_k`、`candidate_k`，会在下次请求懒加载服务时生效。
 - 上传只接受 `.pdf/.docx/.txt/.md/.markdown`，单文件 50 MB；服务端使用 `Path.name` 防止路径穿越。
 - `ResearchAgent` 的 memory SQLite 与 Web conversation SQLite 是两套存储，修改其中一套时要注意一致性。

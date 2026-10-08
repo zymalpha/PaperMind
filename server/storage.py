@@ -44,7 +44,12 @@ class ConversationStore:
         return {"session_id": session_id, "title": title[:120], "created_at": now, "updated_at": now}
 
     def ensure(self, session_id: str | None) -> dict[str, Any]:
-        return self.get(session_id) if session_id and self.get(session_id) else self.create()
+        if not session_id:
+            return self.create()
+        session = self.get(session_id)
+        if not session:
+            raise KeyError("会话不存在")
+        return session
 
     def list(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -66,7 +71,7 @@ class ConversationStore:
 
     def delete(self, session_id: str) -> bool:
         with sqlite3.connect(self.path) as db:
-            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
             cursor = db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
         return cursor.rowcount > 0
 

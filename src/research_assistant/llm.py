@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -95,11 +96,16 @@ class DeepSeekClient:
         messages: Sequence[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 4096,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[str]:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             emitted = False
+            stream = None
+            watcher_stop = threading.Event()
             try:
+                if cancel_event and cancel_event.is_set():
+                    return
                 stream = self._client.chat.completions.create(
                     model=self.model,
                     messages=list(messages),
@@ -107,21 +113,46 @@ class DeepSeekClient:
                     max_tokens=max_tokens,
                     stream=True,
                 )
+
+                def close_on_cancel() -> None:
+                    while not watcher_stop.wait(0.05):
+                        if cancel_event and cancel_event.is_set():
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                            return
+
+                if cancel_event:
+                    threading.Thread(target=close_on_cancel, daemon=True).start()
                 for event in stream:
+                    if cancel_event and cancel_event.is_set():
+                        return
                     delta = event.choices[0].delta.content if event.choices else None
                     if delta:
                         emitted = True
                         yield delta
                 if not emitted:
+                    if cancel_event and cancel_event.is_set():
+                        return
                     raise LLMError("模型返回了空内容")
                 return
             except (APIConnectionError, APITimeoutError, RateLimitError, APIStatusError, LLMError) as exc:
+                if cancel_event and cancel_event.is_set():
+                    return
                 last_error = exc
                 # Once partial text is visible, automatic retries would duplicate the answer.
                 retryable = not isinstance(exc, APIStatusError) or exc.status_code == 429 or exc.status_code >= 500
                 if emitted or attempt >= self.max_retries or not retryable:
                     break
                 time.sleep(min(2**attempt, 4))
+            finally:
+                watcher_stop.set()
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         raise self._safe_error(last_error)
 
     @staticmethod

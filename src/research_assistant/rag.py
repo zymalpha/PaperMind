@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import hashlib
 import json
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -92,7 +93,13 @@ class RAGEngine:
         self._log(question, usable, response, "fallback" if response.warning else "ok")
         return response
 
-    def stream_answer(self, question: str, document_id: str | None = None) -> tuple[Iterator[str], list[Citation]]:
+    def stream_answer(
+        self,
+        question: str,
+        document_id: str | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[Iterator[str], list[Citation]]:
         started = time.perf_counter()
         results = self.retrieve(question, document_id=document_id)
         usable = [result for result in results if result.score >= self.min_relevance]
@@ -101,7 +108,11 @@ class RAGEngine:
         if not usable:
             message = "当前知识库中未找到与该问题足够相关的内容。请尝试换一种表述，或先导入相关论文。"
             return iter([message]), citations
+        history = [item for item in (conversation_history or []) if item.get("role") in {"user", "assistant"}]
         namespace = self._namespace(usable)
+        if history:
+            identity = json.dumps(history[-12:], ensure_ascii=False, sort_keys=True)
+            namespace = hashlib.sha256(f"{namespace}:{identity}".encode()).hexdigest()[:16]
         query_vector = self.embedding.embed_query(question)
         cached = self.cache.get(query_vector, namespace) if self.cache else None
         if cached:
@@ -114,10 +125,13 @@ class RAGEngine:
             pieces: list[str] = []
             try:
                 for part in self.llm.stream_chat(
-                    build_rag_messages(question, self._contexts(usable, self.max_context_chars)),
+                    build_rag_messages(question, self._contexts(usable, self.max_context_chars), history),
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
+                    cancel_event=cancel_event,
                 ):
+                    if cancel_event and cancel_event.is_set():
+                        return
                     pieces.append(part)
                     yield part
                 answer = "".join(pieces)

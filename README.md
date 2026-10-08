@@ -105,6 +105,6 @@ python -m pip check
 cd web; npm run build
 ```
 
-最近一次本地结果：Python 测试 `19 passed`，前端 Vite production build 通过。真实 DeepSeek 生成和真实论文上传需要在配置本地密钥与模型后执行，避免测试阶段产生无意义费用。
+最近一次本地结果：Python 测试 `22 passed`，`python -m compileall`、`pip check`、前端 Vite production build 与 `npm audit --omit=dev` 通过。真实 DeepSeek 生成和真实论文上传仍需在配置本地密钥与模型后执行，避免测试阶段产生无意义费用；本轮没有声称完成真实论文端到端验收。
 
 阶段状态、限制和后续计划见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，接手流程见 [docs/HANDOFF.md](docs/HANDOFF.md)。
