@@ -13,6 +13,12 @@ models/*
 .streamlit/secrets.toml
 data/uploads/*
 !data/uploads/.gitkeep
+data/attachments/*
+!data/attachments/.gitkeep
+data/research_library/*
+!data/research_library/.gitkeep
+data/research_library_*/
+data/perf_probe/
 data/index/*
 !data/index/.gitkeep
 data/logs/*
@@ -23,7 +29,20 @@ data/papers/.download_state.json
 data/papers/*
 !data/papers/.gitkeep
 data/papers_test_index/
+data/papermind_stage3_acceptance/
+docs/screenshots/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
 *.log
+
+data/index/backup_*/
+
+# Local course-report documents, templates, PPT reference packs, and rendered assets.
+/deliverables/
+/实习报告及ppt制作参考/
+/实习报告及ppt制作参考.zip
+/docs/report_assets/
+/docs/第三阶段最终验收报告.md
+/docs/论文测试数据清单.md
+/docs/附件功能与索引性能审查.md

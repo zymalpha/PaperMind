@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,8 @@ class ResearchAgent:
         self.log_path = log_path
         self.max_iterations, self.tool_timeout_seconds, self.max_parallel_tools = max_iterations, tool_timeout_seconds, max_parallel_tools
 
-    def run(self, question: str, session_id: str | None = None) -> dict[str, Any]:
+    def run(self, question: str, session_id: str | None = None,
+            cancel_event: threading.Event | None = None) -> dict[str, Any]:
         if not question.strip():
             raise ValueError("问题不能为空")
         session_id = session_id or str(uuid.uuid4())
@@ -75,12 +77,21 @@ class ResearchAgent:
         seen: set[str] = set()
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         answer = ""
+        cancelled = False
         for step in range(1, self.max_iterations + 1):
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
             try:
                 result = self.llm.chat(messages, tools=self.tools.definitions, tool_choice="auto")
                 self._add_usage(total_usage, result.usage)
             except Exception as exc:
                 answer = f"Agent 模型调用失败，可稍后重试。({type(exc).__name__})"
+                break
+            # The synchronous SDK call itself cannot be interrupted, but a
+            # disconnected client must not trigger another model/tool round.
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
                 break
             if not result.tool_calls:
                 answer = result.content
@@ -113,10 +124,14 @@ class ResearchAgent:
                 self._write_log(session_id, entry)
                 observation = json.dumps(outcome, ensure_ascii=False, default=str)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": observation[:10000]})
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
         else:
             answer = "已达到 Agent 最大工具调用轮数。当前执行记录已保留，请缩小任务范围后重试。"
         if not answer:
-            answer = "Agent 未能生成最终答复；请检查工具执行记录后重试。"
+            answer = ("已收到停止请求。正在执行的单次模型或工具调用无法被强制中断；该调用已返回，后续 Agent 步骤已停止。"
+                      if cancelled else "Agent 未能生成最终答复；请检查工具执行记录后重试。")
         history.extend([{"role": "user", "content": question.strip()}, {"role": "assistant", "content": answer}])
         bounded = self.memory.bounded(history)
         if len(bounded) < len(history):
@@ -125,7 +140,7 @@ class ResearchAgent:
             summary = self._compress(summary, removed)
         self.memory.save(session_id, bounded, summary)
         return {"session_id": session_id, "answer": answer, "tool_trace": trace, "usage": total_usage,
-                "iterations": max((entry["step"] for entry in trace), default=0)}
+                "iterations": max((entry["step"] for entry in trace), default=0), "cancelled": cancelled}
 
     def _compress(self, previous: str, removed: list[dict[str, str]]) -> str:
         transcript = "\n".join(f"{item['role']}: {item.get('content', '')}" for item in removed)

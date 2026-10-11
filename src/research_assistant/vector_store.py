@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from .embeddings import EmbeddingProvider
 from .models import Chunk, SearchResult
@@ -22,7 +23,8 @@ class ChromaVectorStore:
         self._client = chromadb.PersistentClient(path=str(persist_directory))
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine", "embedding_model": getattr(embedding, "model_name", "custom")},
+            metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100,
+                      "hnsw:batch_size": 100, "embedding_model": getattr(embedding, "model_name", "custom")},
         )
 
     @property
@@ -32,10 +34,15 @@ class ChromaVectorStore:
     def upsert(self, chunks: list[Chunk], batch_size: int = 64) -> int:
         if not chunks:
             return 0
+        self.last_batch_timings: list[dict[str, float | int]] = []
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
             texts = [chunk.text for chunk in batch]
+            embed_started = time.perf_counter()
             vectors = self.embedding.embed_documents(texts)
+            embed_ms = (time.perf_counter() - embed_started) * 1000
+            if hasattr(self, "last_batch_timings"):
+                self.last_batch_timings.append({"batch": start // batch_size + 1, "items": len(batch), "embedding_ms": round(embed_ms, 1)})
             self._collection.upsert(
                 ids=[chunk.id for chunk in batch],
                 documents=texts,
@@ -44,12 +51,12 @@ class ChromaVectorStore:
             )
         return len(chunks)
 
-    def query(self, text: str, top_k: int = 5, document_id: str | None = None) -> list[SearchResult]:
+    def query(self, text: str, top_k: int = 5, document_id: str | None = None, document_ids: list[str] | None = None) -> list[SearchResult]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
         if self.count == 0:
             return []
-        where = {"document_id": document_id} if document_id else None
+        where = {"document_id": document_id} if document_id else ({"document_id": {"$in": document_ids}} if document_ids else None)
         result = self._collection.query(
             query_embeddings=[self.embedding.embed_query(text)],
             n_results=min(top_k, self.count),
@@ -94,10 +101,10 @@ class ChromaVectorStore:
         if chunk_ids:
             self._collection.delete(ids=sorted(chunk_ids))
 
-    def all_chunks(self, document_id: str | None = None) -> list[Chunk]:
+    def all_chunks(self, document_id: str | None = None, document_ids: list[str] | None = None) -> list[Chunk]:
         """Read persisted corpus metadata for local lexical retrieval."""
         result = self._collection.get(
-            where={"document_id": document_id} if document_id else None,
+            where={"document_id": document_id} if document_id else ({"document_id": {"$in": document_ids}} if document_ids else None),
             include=["documents", "metadatas"],
         )
         chunks: list[Chunk] = []

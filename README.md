@@ -105,6 +105,6 @@ python -m pip check
 cd web; npm run build
 ```
 
-最近一次本地结果：Python 测试 `22 passed`，`python -m compileall`、`pip check`、前端 Vite production build 与 `npm audit --omit=dev` 通过。真实 DeepSeek 生成和真实论文上传仍需在配置本地密钥与模型后执行，避免测试阶段产生无意义费用；本轮没有声称完成真实论文端到端验收。
+最近一次本地结果：Python 测试 `28 passed`，`python -m compileall`、`pip check`、前端 Vite production build 通过；真实 Edge 浏览器验收已覆盖隔离论文上传、ReAct 引用问答、中文 Agent 计算、会话刷新恢复、三种模式、主题和移动视口。验收截图与本地课程报告材料均被 `.gitignore` 排除。Agent 单次同步模型调用仍无法硬取消。
 
 阶段状态、限制和后续计划见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，接手流程见 [docs/HANDOFF.md](docs/HANDOFF.md)。

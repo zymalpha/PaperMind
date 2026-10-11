@@ -72,7 +72,11 @@ def load_settings(config_path: Path | None = None) -> Settings:
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
 
-    data_dir = PROJECT_ROOT / str(_nested(data, "app", "data_dir", "data"))
+    configured_data_dir = os.getenv("PAPERMIND_DATA_DIR", str(_nested(data, "app", "data_dir", "data")))
+    data_dir = Path(configured_data_dir)
+    if not data_dir.is_absolute():
+        data_dir = PROJECT_ROOT / data_dir
+    data_dir = data_dir.resolve()
     settings = Settings(
         project_root=PROJECT_ROOT,
         data_dir=data_dir,

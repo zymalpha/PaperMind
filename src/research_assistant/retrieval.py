@@ -133,13 +133,13 @@ class HybridRetriever:
         self.rrf_k, self.candidate_k = rrf_k, candidate_k
         self.last_warning: str | None = None
 
-    def search(self, query: str, top_k: int = 5, mode: str = "hybrid_rerank", document_id: str | None = None) -> list[SearchResult]:
+    def search(self, query: str, top_k: int = 5, mode: str = "hybrid_rerank", document_id: str | None = None, document_ids: list[str] | None = None) -> list[SearchResult]:
         if mode not in self.MODES:
             raise ValueError(f"Unknown retrieval mode: {mode}")
-        vector = self.vector_store.query(query, self.candidate_k if mode != "vector" else top_k, document_id)
+        vector = self.vector_store.query(query, self.candidate_k if mode != "vector" else top_k, document_id, document_ids)
         if mode == "vector":
             return vector[:top_k]
-        chunks = self.vector_store.all_chunks(document_id)
+        chunks = self.vector_store.all_chunks(document_id, document_ids)
         bm25 = BM25Retriever(chunks).search(query, self.candidate_k)
         fused = reciprocal_rank_fusion([vector, bm25], self.rrf_k)
         self.last_warning = None
@@ -152,3 +152,32 @@ class HybridRetriever:
                 except Exception as exc:
                     self.last_warning = f"reranker_unavailable:{type(exc).__name__}"
         return fused[:top_k]
+
+
+class MultiCorpusRetriever:
+    """Search independent long-term and session-local corpora without merging their storage."""
+
+    def __init__(self, retrievers: Sequence[HybridRetriever], reranker: Reranker | None = None,
+                 candidate_k: int = 20, rrf_k: int = 60) -> None:
+        self.retrievers = list(retrievers)
+        self.reranker = reranker
+        self.candidate_k = candidate_k
+        self.rrf_k = rrf_k
+        self.last_warning: str | None = None
+
+    def search(self, query: str, top_k: int = 5, mode: str = "hybrid_rerank",
+               document_id: str | None = None, document_ids: list[str] | None = None) -> list[SearchResult]:
+        lists = [retriever.search(query, self.candidate_k, mode, document_id, document_ids)
+                 for retriever in self.retrievers]
+        merged = reciprocal_rank_fusion(lists, self.rrf_k)
+        self.last_warning = next((item.last_warning for item in self.retrievers if item.last_warning), None)
+        if mode != "hybrid_rerank":
+            return merged[:top_k]
+        if self.reranker is None:
+            self.last_warning = self.last_warning or "reranker_not_configured"
+            return merged[:top_k]
+        try:
+            return self.reranker.rerank(query, merged[:self.candidate_k], top_k)
+        except Exception as exc:
+            self.last_warning = f"reranker_unavailable:{type(exc).__name__}"
+            return merged[:top_k]

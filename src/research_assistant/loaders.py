@@ -10,7 +10,7 @@ from docx import Document
 from .models import DocumentPage
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".markdown"}
 
 
 class DocumentLoader(Protocol):
@@ -69,9 +69,10 @@ class LoaderRegistry:
             ".docx": DocxLoader(),
             ".txt": TextLoader(),
             ".md": TextLoader(),
+            ".markdown": TextLoader(),
         }
 
-    def load(self, path: str | Path) -> tuple[str, list[DocumentPage]]:
+    def load(self, path: str | Path, document_id: str | None = None) -> tuple[str, list[DocumentPage]]:
         source = Path(path).resolve()
         if not source.is_file():
             raise FileNotFoundError(f"文件不存在: {source}")
@@ -79,19 +80,19 @@ class LoaderRegistry:
         if suffix not in self._loaders:
             supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
             raise ValueError(f"不支持 {suffix or '无扩展名'} 文件，支持: {supported}")
-        document_id = calculate_document_id(source)
+        document_id = document_id or calculate_document_id(source)
         pages = self._loaders[suffix].load(source, document_id)
         if not pages:
             raise ValueError(f"文档中没有可索引的文本: {source.name}")
         return document_id, pages
 
 
-def _page(text: str, path: Path, page: int, document_id: str) -> DocumentPage:
+def _page(text: str, path: Path, page: int, document_id: str, metadata: dict | None = None) -> DocumentPage:
     return DocumentPage(
         text=text,
         source_path=str(path),
         source_name=path.name,
         page=page,
         document_id=document_id,
+        metadata=metadata or {},
     )
-

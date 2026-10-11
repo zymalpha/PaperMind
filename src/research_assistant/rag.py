@@ -46,16 +46,16 @@ class RAGEngine:
         self.cache = SemanticAnswerCache(log_path.parent / "semantic_cache.sqlite3", semantic_cache_threshold) if semantic_cache_enabled and log_path else None
         self.log_path = log_path
 
-    def retrieve(self, question: str, document_id: str | None = None) -> list[SearchResult]:
+    def retrieve(self, question: str, document_id: str | None = None, document_ids: list[str] | None = None) -> list[SearchResult]:
         if not question.strip():
             raise ValueError("问题不能为空")
         if self.retriever:
-            return self.retriever.search(question.strip(), self.top_k, self.retrieval_mode, document_id)
-        return self.vector_store.query(question.strip(), self.top_k, document_id=document_id)
+            return self.retriever.search(question.strip(), self.top_k, self.retrieval_mode, document_id, document_ids)
+        return self.vector_store.query(question.strip(), self.top_k, document_id=document_id, document_ids=document_ids)
 
-    def answer(self, question: str, document_id: str | None = None) -> RAGResponse:
+    def answer(self, question: str, document_id: str | None = None, document_ids: list[str] | None = None) -> RAGResponse:
         started = time.perf_counter()
-        results = self.retrieve(question, document_id=document_id)
+        results = self.retrieve(question, document_id=document_id, document_ids=document_ids)
         usable = [result for result in results if result.score >= self.min_relevance]
         usable = self._bounded_results(usable, self.max_context_chars)
         if not usable:
@@ -99,9 +99,10 @@ class RAGEngine:
         document_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
+        document_ids: list[str] | None = None,
     ) -> tuple[Iterator[str], list[Citation]]:
         started = time.perf_counter()
-        results = self.retrieve(question, document_id=document_id)
+        results = self.retrieve(question, document_id=document_id, document_ids=document_ids)
         usable = [result for result in results if result.score >= self.min_relevance]
         usable = self._bounded_results(usable, self.max_context_chars)
         citations = self._citations(usable or results)
@@ -140,12 +141,14 @@ class RAGEngine:
                 response = RAGResponse(answer, citations, self.llm.model, round((time.perf_counter() - started) * 1000))
                 self._log(question, usable, response, "stream_ok")
             except Exception as exc:
-                if not pieces:
-                    yield "模型暂时不可用。以下为检索到的原文片段，请依据引用核对：\n\n" + usable[0].chunk.text[:700]
                 response = RAGResponse("".join(pieces), citations, self.llm.model,
                                        round((time.perf_counter() - started) * 1000),
                                        warning=f"stream_failed:{type(exc).__name__}")
                 self._log(question, usable, response, "stream_fallback")
+                # Let the API emit an explicit error event. Turning a model
+                # failure into ordinary answer tokens makes the UI claim that
+                # generation succeeded and prevents a reliable retry affordance.
+                raise
 
         return generate(), citations
 

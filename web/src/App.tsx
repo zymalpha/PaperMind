@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import rehypeHighlight from "rehype-highlight";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, FileText, FolderOpen, Loader2, Menu, MessageSquare, Moon, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Send, Settings as SettingsIcon, Sparkles, Sun, Trash2, UploadCloud, X, Zap } from "lucide-react";
-import { api, ChatMessage, Citation, Document, Session, Settings, streamChat, ToolTrace } from "./api";
+import { api, Attachment, ChatMessage, Citation, Document, Session, Settings, streamChat, ToolTrace } from "./api";
 
 type Page = "chat" | "library" | "settings";
+const MessageBubble = lazy(() => import("./MessageBubble"));
 
 function App() {
   const [page, setPage] = useState<Page>("chat");
@@ -19,22 +15,27 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [settings, setSettings] = useState<Settings>();
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [agentMode, setAgentMode] = useState(false);
   const [toast, setToast] = useState<string>();
+  const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const controller = useRef<AbortController>();
+  const activeIdRef = useRef<string>();
 
   const notify = useCallback((message: string) => { setToast(message); window.setTimeout(() => setToast(undefined), 3200); }, []);
   const refreshSessions = useCallback(async () => { const result = await api.sessions(); setSessions(result.sessions); return result.sessions; }, []);
-  const loadSession = useCallback(async (id: string) => { const result = await api.session(id); setActiveId(id); setMessages(result.messages); localStorage.setItem("papermind-session", id); }, []);
+  const loadSession = useCallback(async (id: string) => { activeIdRef.current = id; const result = await api.session(id); if (activeIdRef.current !== id) return; setActiveId(id); setMessages(result.messages); localStorage.setItem("papermind-session", id); }, []);
   const refreshDocuments = useCallback(async () => { try { const result = await api.documents(); setDocuments(result.documents); } catch (error) { notify(error instanceof Error ? error.message : "文档加载失败"); } }, [notify]);
 
+  const refreshAttachments = useCallback(async (sessionId: string) => { try { const result = await api.attachments(sessionId); setAttachments(result.attachments); } catch (error) { notify(error instanceof Error ? error.message : "附件加载失败"); } }, [notify]);
+  useEffect(() => { if (activeId) void refreshAttachments(activeId); else setAttachments([]); }, [activeId, refreshAttachments]);
   useEffect(() => {
     Promise.all([refreshSessions(), api.settings()]).then(([loaded, current]) => {
-      setSettings(current); const saved = localStorage.getItem("papermind-session"); const selected = loaded.find((item) => item.session_id === saved) ?? loaded[0];
+      setApiOnline(true); setSettings(current); const saved = localStorage.getItem("papermind-session"); const selected = loaded.find((item) => item.session_id === saved) ?? loaded[0];
       if (selected) void loadSession(selected.session_id); else void api.createSession().then((session) => { setSessions([session]); void loadSession(session.session_id); });
-    }).catch((error) => notify(error instanceof Error ? error.message : "服务连接失败"));
+    }).catch((error) => { setApiOnline(false); notify(error instanceof Error ? error.message : "服务连接失败"); });
   }, [loadSession, notify, refreshSessions]);
   useEffect(() => { if (page === "library") void refreshDocuments(); }, [page, refreshDocuments]);
   useEffect(() => { document.documentElement.dataset.theme = dark ? "dark" : "light"; localStorage.setItem("papermind-theme", dark ? "dark" : "light"); }, [dark]);
@@ -46,28 +47,35 @@ function App() {
 
   const send = async (event?: React.FormEvent, retryQuestion?: string) => {
     event?.preventDefault(); const question = (retryQuestion ?? draft).trim(); if (!question || busy || !activeId) return;
-    if (!retryQuestion) setDraft(""); setBusy(true); setMessages((list) => [...list, { role: "user", content: question }, { role: "assistant", content: "" }]);
+    const targetSessionId = activeId; const responseId = crypto.randomUUID();
+    if (!retryQuestion) setDraft(""); setBusy(true); setMessages((list) => [...list, { role: "user", content: question, local_id: crypto.randomUUID() }, { role: "assistant", content: "", local_id: responseId }]);
     const abort = new AbortController(); controller.current = abort;
+    const updateResponse = (update: (message: ChatMessage) => ChatMessage) => {
+      if (activeIdRef.current !== targetSessionId) return;
+      setMessages((list) => list.map((message) => message.local_id === responseId ? update(message) : message));
+    };
     try {
-      await streamChat({ question, session_id: activeId, retrieval_mode: settings?.retrieval_mode, use_agent: agentMode }, {
-        onSession: (id) => { if (id !== activeId) { setActiveId(id); localStorage.setItem("papermind-session", id); } },
-        onToken: (token) => setMessages((list) => { const copy = [...list]; const last = copy.length - 1; copy[last] = { ...copy[last], content: copy[last].content + token }; return copy; }),
-        onCitations: (citations) => setMessages((list) => { const copy = [...list]; const last = copy.length - 1; copy[last] = { ...copy[last], citations }; return copy; }),
-        onTool: (tool) => setMessages((list) => { const copy = [...list]; const last = copy.length - 1; const citations = [...(copy[last].citations ?? [])]; const value = tool.result as { results?: Array<{ source: string; page: number; score: number; chunk_id: string; text: string }> } | undefined; for (const source of value?.results ?? []) { if (!citations.some((item) => item.chunk_id === source.chunk_id)) citations.push({ index: citations.length + 1, source_name: source.source, page: source.page, score: source.score, chunk_id: source.chunk_id, excerpt: source.text }); } copy[last] = { ...copy[last], citations, tools: [...(copy[last].tools ?? []), tool] }; return copy; }),
-        onFinal: (data) => setMessages((list) => { const copy = [...list]; const last = copy.length - 1; copy[last] = { ...copy[last], content: data.answer, citations: data.citations.length ? data.citations : copy[last].citations, tools: data.tools }; return copy; }),
-        onError: (message) => { setMessages((list) => { const copy = [...list]; const last = copy.length - 1; copy[last] = { ...copy[last], content: `请求失败：${message}` }; return copy; }); notify(message); },
+      await streamChat({ question, session_id: targetSessionId, attachment_ids: attachments.map((item) => item.document_id), retrieval_mode: settings?.retrieval_mode, use_agent: agentMode }, {
+        onToken: (token) => updateResponse((message) => ({ ...message, content: message.content + token })),
+        onCitations: (citations) => updateResponse((message) => ({ ...message, citations })),
+        onTool: (tool) => updateResponse((message) => { const citations = [...(message.citations ?? [])]; const value = tool.result as { results?: Array<{ source: string; page: number; score: number; chunk_id: string; text: string }> } | undefined; for (const source of value?.results ?? []) { if (!citations.some((item) => item.chunk_id === source.chunk_id)) citations.push({ index: citations.length + 1, source_name: source.source, page: source.page, score: source.score, chunk_id: source.chunk_id, excerpt: source.text }); } return { ...message, citations, tools: [...(message.tools ?? []), tool] }; }),
+        onFinal: (data) => updateResponse((message) => ({ ...message, content: data.answer, citations: data.citations.length ? data.citations : message.citations, tools: data.tools })),
+        onError: (message) => { updateResponse((current) => ({ ...current, error: message })); if (activeIdRef.current === targetSessionId) notify(message); },
       }, abort.signal);
       await refreshSessions();
-    } catch (error) { if ((error as Error).name !== "AbortError") { setMessages((list) => { const copy = [...list]; const last = copy.length - 1; if (copy[last]?.role === "assistant" && !copy[last].content) copy[last] = { ...copy[last], content: `请求失败：${(error as Error).message}` }; else copy.push({ role: "assistant", content: `请求失败：${(error as Error).message}` }); return copy; }); notify((error as Error).message); } }
-    finally { setBusy(false); controller.current = undefined; }
+    } catch (error) {
+      if ((error as Error).name === "AbortError") updateResponse((message) => ({ ...message, error: agentMode ? "已停止接收。Agent 正在进行的单次模型或工具调用无法强制中断，会在该调用返回后停止。" : "生成已停止；以上内容可能不完整。" }));
+      else { updateResponse((message) => ({ ...message, error: (error as Error).message })); if (activeIdRef.current === targetSessionId) notify((error as Error).message); }
+    }
+    finally { if (controller.current === abort) { setBusy(false); controller.current = undefined; } }
   };
-  const stop = () => { controller.current?.abort(); notify("正在停止生成…"); };
+  const stop = () => { controller.current?.abort(); notify(agentMode ? "已请求停止；Agent 当前调用返回后会停止后续步骤。" : "正在停止流式生成…"); };
 
   return <div className="app-shell">
     <Sidebar collapsed={collapsed} mobileOpen={mobileOpen} sessions={sessions} activeId={activeId} page={page} onPage={setPage} onNew={newSession} onSelect={selectSession} onRename={rename} onDelete={remove} onCollapse={() => setCollapsed((value) => !value)} onClose={() => setMobileOpen(false)} />
     <main className="main-shell">
-      <header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="打开导航"><Menu size={20} /></button><div className="breadcrumbs"><span>PaperMind</span><ChevronRight size={14} /><strong>{page === "chat" ? (sessions.find((item) => item.session_id === activeId)?.title ?? "科研工作台") : page === "library" ? "论文知识库" : "系统设置"}</strong></div><div className="top-actions"><button className="icon-button" onClick={() => setDark((value) => !value)} aria-label="切换主题">{dark ? <Sun size={18} /> : <Moon size={18} />}</button><span className="status-pill"><span className="status-dot" />在线</span></div></header>
-      {page === "chat" && <ChatPage messages={messages} draft={draft} setDraft={setDraft} busy={busy} agentMode={agentMode} setAgentMode={setAgentMode} settings={settings} onSend={send} onRetry={(index) => { const previous = messages.slice(0, index).reverse().find((item) => item.role === "user"); if (previous) void send(undefined, previous.content); }} onStop={stop} notify={notify} />}
+      <header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="打开导航"><Menu size={20} /></button><div className="breadcrumbs"><span>PaperMind</span><ChevronRight size={14} /><strong>{page === "chat" ? (sessions.find((item) => item.session_id === activeId)?.title ?? "科研工作台") : page === "library" ? "论文知识库" : "系统设置"}</strong></div><div className="top-actions"><button className="icon-button" onClick={() => setDark((value) => !value)} aria-label="切换主题">{dark ? <Sun size={18} /> : <Moon size={18} />}</button><span className={`status-pill ${apiOnline === false ? "offline" : ""}`}><span className="status-dot" />{apiOnline === null ? "连接中" : apiOnline ? "服务在线" : "服务离线"}</span></div></header>
+      {page === "chat" && <ChatPage messages={messages} draft={draft} setDraft={setDraft} busy={busy} agentMode={agentMode} setAgentMode={setAgentMode} settings={settings} attachments={attachments} sessionId={activeId} onAttachments={setAttachments} onSend={send} onRetry={(index) => { const previous = messages.slice(0, index).reverse().find((item) => item.role === "user"); if (previous) void send(undefined, previous.content); }} onStop={stop} notify={notify} />}
       {page === "library" && <LibraryPage documents={documents} refresh={refreshDocuments} notify={notify} />}
       {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} notify={notify} />}
     </main>
@@ -84,18 +92,34 @@ function Sidebar({ collapsed, mobileOpen, sessions, activeId, page, onPage, onNe
   </aside>;
 }
 
-function ChatPage({ messages, draft, setDraft, busy, agentMode, setAgentMode, settings, onSend, onRetry, onStop, notify }: { messages: ChatMessage[]; draft: string; setDraft: (value: string) => void; busy: boolean; agentMode: boolean; setAgentMode: (value: boolean) => void; settings?: Settings; onSend: (event?: React.FormEvent, retryQuestion?: string) => void; onRetry: (index: number) => void; onStop: () => void; notify: (message: string) => void }) {
+function ChatPage({ messages, draft, setDraft, busy, agentMode, setAgentMode, settings, attachments, sessionId, onAttachments, onSend, onRetry, onStop, notify }: { messages: ChatMessage[]; draft: string; setDraft: (value: string) => void; busy: boolean; agentMode: boolean; setAgentMode: (value: boolean) => void; settings?: Settings; attachments: Attachment[]; sessionId?: string; onAttachments: (items: Attachment[]) => void; onSend: (event?: React.FormEvent, retryQuestion?: string) => void; onRetry: (index: number) => void; onStop: () => void; notify: (message: string) => void }) {
   const endRef = useRef<HTMLDivElement>(null); useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-  return <section className="chat-page"><div className="chat-scroll"><div className="chat-inner">{messages.length === 0 ? <EmptyState onPrompt={(value) => setDraft(value)} /> : messages.map((message, index) => <MessageBubble key={`${index}-${message.role}`} message={message} notify={notify} onRetry={() => onRetry(index)} />)}<div ref={endRef} /></div></div><form className="composer-wrap" onSubmit={onSend}><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder={agentMode ? "让 Agent 选择工具并完成任务…" : "询问你的论文，或输入一个研究问题…"} rows={1} disabled={busy} /><div className="composer-toolbar"><div className="composer-left"><button type="button" className="tool-chip" onClick={() => setAgentMode(!agentMode)}><Bot size={15} />Agent {agentMode ? "已启用" : "模式"}</button><span className="context-chip"><Archive size={14} />全库 · {settings?.retrieval_mode === "hybrid_rerank" ? "混合 + 重排" : settings?.retrieval_mode === "hybrid" ? "混合检索" : "纯向量"}</span></div><div className="composer-right"><button type="button" className="icon-button attach" onClick={() => notify("请前往论文知识库上传文档")}><Paperclip size={17} /></button>{busy ? <button type="button" className="stop-button" onClick={onStop}><span className="stop-square" />停止</button> : <button className="send-button" disabled={!draft.trim()} aria-label="发送"><Send size={16} /></button>}</div></div></div><div className="composer-hint">PaperMind 可能会出错，请核对论文来源与关键结论 · Shift + Enter 换行</div></form></section>;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const upload = async (files: FileList | null) => {
+    if (!sessionId || !files?.length) return;
+    try {
+      const result = await api.uploadAttachments(sessionId, Array.from(files));
+      const failed = result.results.filter((item) => !item.ok);
+      const added = result.results.flatMap((item) => item.attachment ? [item.attachment] : []);
+      onAttachments([...attachments, ...added]);
+      notify(failed.length ? `${failed.length} 个附件处理失败` : `已添加 ${added.length} 个临时附件`);
+    } catch (error) { notify((error as Error).message); }
+    if (inputRef.current) inputRef.current.value = "";
+  };
+  const removeAttachment = async (item: Attachment) => {
+    if (!sessionId) return;
+    try { await api.deleteAttachment(sessionId, item.document_id); onAttachments(attachments.filter((value) => value.document_id !== item.document_id)); notify("临时附件已移除"); }
+    catch (error) { notify((error as Error).message); }
+  };
+  const saveAttachment = async (item: Attachment) => {
+    if (!sessionId) return;
+    try { await api.saveAttachment(sessionId, item.document_id); notify("附件已保存到长期知识库"); }
+    catch (error) { notify((error as Error).message); }
+  };
+  return <section className="chat-page"><div className="chat-scroll"><div className="chat-inner">{messages.length === 0 ? <EmptyState onPrompt={(value) => setDraft(value)} /> : <Suspense fallback={<div className="message-loading">正在加载消息…</div>}>{messages.map((message, index) => <MessageBubble key={message.local_id ?? `${index}-${message.role}`} message={message} notify={notify} onRetry={() => onRetry(index)} />)}</Suspense>}<div ref={endRef} /></div></div><form className="composer-wrap" onSubmit={onSend}><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder={agentMode ? "让 Agent 选择工具并完成任务…" : "询问你的论文，或输入一个研究问题…"} rows={1} disabled={busy} />{attachments.length > 0 && <div className="attachment-strip">{attachments.map((item) => <span className="attachment-chip" key={item.document_id}><FileText size={13} /><span>{item.source_name}</span><button type="button" title="保存到长期知识库" onClick={() => void saveAttachment(item)}><Archive size={13} /></button><button type="button" title="移除附件" onClick={() => void removeAttachment(item)}><X size={13} /></button></span>)}</div>}<div className="composer-toolbar"><div className="composer-left"><button type="button" className="tool-chip" onClick={() => setAgentMode(!agentMode)}><Bot size={15} />Agent {agentMode ? "已启用" : "模式"}</button><span className="context-chip"><Archive size={14} />{attachments.length ? `当前会话附件 · ${attachments.length}` : `全库 · ${settings?.retrieval_mode === "hybrid_rerank" ? "混合 + 重排" : settings?.retrieval_mode === "hybrid" ? "混合检索" : "纯向量"}`}</span></div><div className="composer-right"><button type="button" className="icon-button attach" onClick={() => inputRef.current?.click()} title="添加临时附件"><Paperclip size={17} /></button><input ref={inputRef} type="file" hidden multiple accept=".pdf,.docx,.txt,.md,.markdown" onChange={(event) => void upload(event.target.files)} />{busy ? <button type="button" className="stop-button" onClick={onStop}><span className="stop-square" />停止</button> : <button className="send-button" disabled={!draft.trim()} aria-label="发送"><Send size={16} /></button>}</div></div></div><div className="composer-hint">临时附件仅属于当前会话，不会自动进入长期知识库 · Shift + Enter 换行</div></form></section>;
 }
 
 function EmptyState({ onPrompt }: { onPrompt: (value: string) => void }) { const prompts = ["总结知识库中论文的核心创新点", "对比两篇论文的方法与实验设置", "Transformer 在这些论文中如何被应用？"]; return <div className="empty-state"><div className="empty-icon"><Sparkles size={25} /></div><h1>你好，我是 PaperMind</h1><p>把论文交给我，一起梳理方法、证据与研究灵感。</p><div className="prompt-grid">{prompts.map((prompt) => <button key={prompt} onClick={() => onPrompt(prompt)}>{prompt}<ChevronRight size={15} /></button>)}</div></div>; }
-
-function MessageBubble({ message, notify, onRetry }: { message: ChatMessage; notify: (message: string) => void; onRetry: () => void }) { const [copied, setCopied] = useState(false); const copy = async () => { await navigator.clipboard.writeText(message.content); setCopied(true); notify("已复制回答"); window.setTimeout(() => setCopied(false), 1500); }; return <article className={`message ${message.role}`}><div className="message-avatar">{message.role === "user" ? "你" : <Sparkles size={15} />}</div><div className="message-body"><div className="message-meta"><span>{message.role === "user" ? "你" : "PaperMind"}</span>{message.role === "assistant" && message.content && <><button className="copy-button" onClick={copy}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "已复制" : "复制"}</button><button className="copy-button" onClick={onRetry}><RefreshCw size={13} />重新生成</button></>}</div>{message.role === "assistant" && !message.content ? <div className="typing"><i /><i /><i /></div> : <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>{message.content}</ReactMarkdown></div>}{message.tools && message.tools.length > 0 && <ToolTracePanel tools={message.tools} />}{message.citations && message.citations.length > 0 && <Sources citations={message.citations} />}</div></article>; }
-
-function Sources({ citations }: { citations: Citation[] }) { const [open, setOpen] = useState(true); return <div className="sources"><button className="sources-heading" onClick={() => setOpen(!open)}><span><FileText size={15} />来源依据 <em>{citations.length}</em></span>{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</button>{open && <div className="source-list">{citations.map((citation) => <details className="source-item" key={citation.chunk_id}><summary><span className="source-index">[{citation.index}]</span><span className="source-name">{citation.source_name}</span><span className="source-page">第 {citation.page} 页</span></summary><p>{citation.excerpt}</p><small>相关度 {citation.score.toFixed(2)} · chunk {citation.chunk_id.slice(0, 10)}</small></details>)}</div>}</div>; }
-
-function ToolTracePanel({ tools }: { tools: ToolTrace[] }) { const [open, setOpen] = useState(false); return <div className="tool-trace"><button className="tool-trace-heading" onClick={() => setOpen(!open)}><span><Bot size={15} />工具执行 <em>{tools.length}</em></span><span className="trace-status"><Check size={13} />已完成 {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span></button>{open && <div className="trace-list">{tools.map((tool, index) => { const summary = tool.error ?? (tool.result === undefined ? "" : JSON.stringify(tool.result)); return <div className="trace-row" key={`${tool.tool}-${index}`}><span className={`trace-number ${tool.status === "success" ? "success" : "failure"}`}>{index + 1}</span><div><strong>{tool.tool}</strong><small>{tool.status} · {tool.elapsed_ms ?? 0} ms</small>{summary && <p>{summary.length > 220 ? `${summary.slice(0, 220)}…` : summary}</p>}</div></div>; })}</div>}</div>; }
 
 function LibraryPage({ documents, refresh, notify }: { documents: Document[]; refresh: () => Promise<void>; notify: (message: string) => void }) { const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState(0); const inputRef = useRef<HTMLInputElement>(null); const upload = async (files: FileList | null) => { if (!files?.length) return; setUploading(true); try { const result = await api.upload(Array.from(files), setProgress); const failed = result.results.filter((item) => !item.ok); notify(failed.length ? `${failed.length} 个文件处理失败` : `已索引 ${result.results.length} 个文档`); await refresh(); } catch (error) { notify((error as Error).message); } finally { setUploading(false); setProgress(0); if (inputRef.current) inputRef.current.value = ""; } }; const reindex = async (document: Document) => { try { await api.reindex(document.document_id); notify(`${document.source_name} 已重新索引`); await refresh(); } catch (error) { notify((error as Error).message); } }; const remove = async (document: Document) => { if (!window.confirm(`删除 ${document.source_name}？`)) return; try { await api.deleteDocument(document.document_id); notify("文档已删除"); await refresh(); } catch (error) { notify((error as Error).message); } }; return <section className="content-page"><div className="page-heading"><div><div className="eyebrow">KNOWLEDGE BASE</div><h1>论文知识库</h1><p>上传、索引并管理你的科研文献，回答将自动保留真实页码引用。</p></div><button className="primary-button" onClick={() => inputRef.current?.click()} disabled={uploading}><UploadCloud size={17} />导入文档</button><input ref={inputRef} type="file" hidden multiple accept=".pdf,.docx,.txt,.md,.markdown" onChange={(event) => void upload(event.target.files)} /></div>{uploading && <div className="upload-progress"><div><span>正在解析并建立索引…</span><strong>{Math.round(progress * 100)}%</strong></div><div className="progress-track"><span style={{ width: `${Math.max(5, progress * 100)}%` }} /></div></div>}<div className="library-stats"><div><span className="stat-label">已索引文档</span><strong>{documents.length}</strong></div><div><span className="stat-label">检索模式</span><strong>{"混合 + 重排序"}</strong></div><div><span className="stat-label">支持格式</span><strong>PDF · DOCX · TXT</strong></div></div><div className="document-table"><div className="table-header"><span>文档</span><span>索引信息</span><span>状态</span><span /></div>{documents.length === 0 ? <div className="library-empty"><FileText size={25} /><strong>知识库还是空的</strong><p>上传第一篇论文，开始构建可溯源的研究问答。</p><button className="secondary-button" onClick={() => inputRef.current?.click()}>选择文件</button></div> : documents.map((document) => <div className="document-row" key={document.document_id}><div className="document-name"><div className="file-icon"><FileText size={18} /></div><div><strong>{document.source_name}</strong><small>{document.document_id.slice(0, 12)}…</small></div></div><div className="document-info"><span>{document.chunk_count} chunks</span><span>{document.chunk_strategy}</span></div><div><span className="indexed-badge"><Check size={13} />已索引</span></div><div className="row-actions"><button title="重新索引" onClick={() => void reindex(document)}><RefreshCw size={15} /></button><button title="删除" onClick={() => void remove(document)}><Trash2 size={15} /></button></div></div>)}</div></section>; }
 

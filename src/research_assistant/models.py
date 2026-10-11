@@ -12,6 +12,7 @@ class DocumentPage:
     source_name: str
     page: int
     document_id: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -76,6 +77,7 @@ class IndexedDocument:
     chunk_count: int
     indexed_at: str
     chunk_strategy: str = "recursive"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def path(self) -> Path:

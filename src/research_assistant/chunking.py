@@ -41,7 +41,7 @@ class BaseTextChunker:
                         source_name=page.source_name,
                         page=page.page,
                         chunk_index=chunk_index,
-                        metadata={"chunk_strategy": self.strategy},
+                        metadata={"chunk_strategy": self.strategy, **page.metadata},
                     )
                 )
                 chunk_index += 1

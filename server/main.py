@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from research_assistant.config import Settings, load_settings
 from research_assistant.document_store import DocumentManifest
 from research_assistant.service import ResearchAssistantService
+from research_assistant.llm import LLMError
 
 from .storage import ConversationStore
 
@@ -35,6 +36,10 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=12000)
     session_id: str | None = None
     document_id: str | None = None
+    document_ids: list[str] = Field(default_factory=list, max_length=100)
+    direction: str | None = Field(default=None, max_length=80)
+    include_attachments: bool = True
+    attachment_ids: list[str] = Field(default_factory=list, max_length=20)
     retrieval_mode: Literal["vector", "hybrid", "hybrid_rerank"] | None = None
     use_agent: bool = False
 
@@ -59,6 +64,7 @@ class AppState:
         self._service: ResearchAssistantService | None = None
         self._lock = threading.RLock()
         self.conversations = ConversationStore(self.settings.index_dir / "web_conversations.sqlite3")
+        self._attachment_services: dict[str, ResearchAssistantService] = {}
 
     def service(self) -> ResearchAssistantService:
         with self._lock:
@@ -72,7 +78,23 @@ class AppState:
             self.settings = replace(self.settings, **updates)
             self._service = None
             self.conversations = ConversationStore(self.settings.index_dir / "web_conversations.sqlite3")
+            self._attachment_services.clear()
             return self.settings
+
+    def attachment_service(self, session_id: str) -> ResearchAssistantService:
+        """Return a session-local index sharing the loaded embedding model."""
+        with self._lock:
+            service = self._attachment_services.get(session_id)
+            if service is not None:
+                return service
+            root = (self.settings.data_dir / "attachments" / session_id).resolve()
+            scoped = replace(self.settings, data_dir=root, upload_dir=root / "uploads",
+                             index_dir=root / "index", log_dir=root / "logs",
+                             collection_name=f"attachments_{session_id.replace('-', '')[:24]}")
+            scoped.ensure_directories()
+            service = ResearchAssistantService(scoped, embedding=self.service().embedding)
+            self._attachment_services[session_id] = service
+            return service
 
 
 state = AppState()
@@ -137,10 +159,26 @@ def health() -> dict[str, Any]:
     settings, service = state.settings, state._service
     reranker = getattr(service, "_reranker", None) if service else None
     reranker_loaded = getattr(reranker, "_instance", None) is not None
+    vector_status: dict[str, Any] = {
+        "status": "not_initialized",
+        "count": None,
+    }
+    if service is not None:
+        try:
+            vector_status = {"status": "ready", "count": service.vector_store.count}
+        except Exception as exc:
+            # A damaged persisted HNSW segment must not turn the health route
+            # into an unstructured 500. Keep the failure visible to operators
+            # while allowing the UI to report a degraded local index.
+            vector_status = {
+                "status": "error",
+                "count": None,
+                "error": type(exc).__name__,
+            }
     return {
         "status": "ok", "app": settings.app_name, "model": settings.llm_model,
         "llm_configured": settings.llm_configured, "service_initialized": service is not None,
-        "vector_store": {"status": "ready" if service else "not_initialized", "count": service.vector_store.count if service else None},
+        "vector_store": vector_status,
         "embedding": {"model": settings.embedding_model, "status": "loaded" if service else "configured_not_loaded"},
         "reranker": {"model": settings.reranker_model,
                      "status": "loaded" if reranker_loaded else "enabled_not_loaded" if settings.reranker_enabled else "disabled"},
@@ -200,7 +238,86 @@ def list_documents() -> dict[str, Any]:
     manifest = DocumentManifest(state.settings.index_dir / "documents.json")
     docs = sorted(manifest.list(), key=lambda item: item.indexed_at, reverse=True)
     return {"documents": [{"document_id": doc.document_id, "source_name": doc.source_name, "chunk_count": doc.chunk_count,
-                            "indexed_at": doc.indexed_at, "chunk_strategy": doc.chunk_strategy, "status": "indexed"} for doc in docs], "count": len(docs)}
+                            "indexed_at": doc.indexed_at, "chunk_strategy": doc.chunk_strategy, "status": "indexed",
+                            **(doc.metadata or {})} for doc in docs], "count": len(docs)}
+
+
+def _document_dict(doc: Any) -> dict[str, Any]:
+    return {"document_id": doc.document_id, "source_name": doc.source_name, "chunk_count": doc.chunk_count,
+            "indexed_at": doc.indexed_at, "chunk_strategy": doc.chunk_strategy, "status": "indexed",
+            **(doc.metadata or {})}
+
+
+def _session_or_404(session_id: str) -> None:
+    if not state.conversations.get(session_id):
+        raise _error(404, "会话不存在")
+
+
+@app.get("/api/sessions/{session_id}/attachments")
+def list_attachments(session_id: str) -> dict[str, Any]:
+    _session_or_404(session_id)
+    service = state.attachment_service(session_id)
+    docs = service.list_documents()
+    return {"attachments": [_document_dict(doc) for doc in docs], "count": len(docs)}
+
+
+@app.post("/api/sessions/{session_id}/attachments/upload")
+async def upload_attachments(session_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    _session_or_404(session_id)
+    if len(files) > 10:
+        raise _error(413, "单次最多上传 10 个临时附件")
+    service = state.attachment_service(session_id)
+    results: list[dict[str, Any]] = []
+    for upload in files:
+        name, target = _safe_upload_name(upload.filename), None
+        started = time.perf_counter()
+        try:
+            target = service._unique_upload_path(name)
+            total = 0
+            with target.open("wb") as handle:
+                while chunk := await upload.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        raise _error(413, f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 限制")
+                    handle.write(chunk)
+            document, created = await run_in_threadpool(
+                service.index_file, target, False, None, False,
+                {"scope": "session_attachment", "session_id": session_id},
+            )
+            results.append({"ok": True, "created": created, "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                            "attachment": _document_dict(document)})
+        except HTTPException:
+            if target and target.exists():
+                target.unlink()
+            raise
+        except Exception as exc:
+            if target and target.exists():
+                target.unlink()
+            results.append({"ok": False, "filename": name, "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                            "elapsed_ms": round((time.perf_counter() - started) * 1000)})
+        finally:
+            await upload.close()
+    return {"results": results}
+
+
+@app.delete("/api/sessions/{session_id}/attachments/{document_id}")
+def delete_attachment(session_id: str, document_id: str) -> dict[str, Any]:
+    _session_or_404(session_id)
+    if not state.attachment_service(session_id).delete_document(document_id):
+        raise _error(404, "临时附件不存在")
+    return {"deleted": True, "document_id": document_id}
+
+
+@app.post("/api/sessions/{session_id}/attachments/{document_id}/save")
+def save_attachment(session_id: str, document_id: str) -> dict[str, Any]:
+    _session_or_404(session_id)
+    temporary = state.attachment_service(session_id).manifest.get(document_id)
+    if temporary is None or not Path(temporary.source_path).is_file():
+        raise _error(404, "临时附件不存在")
+    document, _ = state.service().index_file(temporary.source_path, copy_to_uploads=True,
+                                              metadata={k: v for k, v in (temporary.metadata or {}).items()
+                                                        if k not in {"scope", "session_id"}})
+    return {"saved": True, "document": _document_dict(document)}
 
 
 def _safe_upload_name(filename: str | None) -> str:
@@ -288,7 +405,9 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
             service = state.service()
             events.put(("session", {"session_id": session_id}))
             if payload.use_agent:
-                result = service.create_agent().run(payload.question, session_id=session_id)
+                if payload.attachment_ids:
+                    raise ValueError("Agent 当前不支持临时附件，请先保存到长期知识库后再使用")
+                result = service.create_agent().run(payload.question, session_id=session_id, cancel_event=cancel_event)
                 citations = _agent_citations(result.get("tool_trace", []))
                 for trace in result.get("tool_trace", []):
                     events.put(("tool", trace))
@@ -300,7 +419,36 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 if payload.retrieval_mode:
                     engine.retrieval_mode = payload.retrieval_mode
                 history = [{"role": item["role"], "content": item["content"]} for item in prior_messages]
-                stream, citations = engine.stream_answer(payload.question, payload.document_id, history, cancel_event)
+                requested_ids = set(payload.document_ids)
+                if payload.document_id:
+                    requested_ids.add(payload.document_id)
+                if payload.direction:
+                    direction_ids = {doc.document_id for doc in service.manifest.list()
+                                     if (doc.metadata or {}).get("direction") == payload.direction}
+                    if not direction_ids:
+                        raise ValueError("该研究方向当前没有已索引论文")
+                    requested_ids.update(direction_ids)
+                if requested_ids:
+                    valid_ids = {doc.document_id for doc in service.manifest.list()}
+                    unknown_ids = requested_ids - valid_ids
+                    if unknown_ids:
+                        raise ValueError("检索范围中包含不存在的论文")
+                scoped_ids = sorted(requested_ids) if requested_ids else None
+                if payload.attachment_ids:
+                    attachment_service = state.attachment_service(session_id)
+                    attachment_ids = set(payload.attachment_ids)
+                    known = {doc.document_id for doc in attachment_service.manifest.list()}
+                    if not attachment_ids.issubset(known):
+                        raise ValueError("临时附件不存在或不属于当前会话")
+                    engine = attachment_service.create_rag_engine()
+                    if payload.retrieval_mode:
+                        engine.retrieval_mode = payload.retrieval_mode
+                    stream, citations = engine.stream_answer(payload.question, None, history, cancel_event, document_ids=sorted(attachment_ids))
+                else:
+                    if scoped_ids is None:
+                        stream, citations = engine.stream_answer(payload.question, payload.document_id, history, cancel_event)
+                    else:
+                        stream, citations = engine.stream_answer(payload.question, None, history, cancel_event, document_ids=scoped_ids)
                 citation_data = [_citation_dict(item) for item in citations]
                 events.put(("citations", citation_data))
                 pieces: list[str] = []
@@ -308,11 +456,20 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                     pieces.append(piece)
                     events.put(("token", piece))
                 answer = "".join(pieces)
+                if cancel_event.is_set():
+                    answer = (answer + "\n\n（已停止生成，以上为部分回答。）").strip()
                 state.conversations.add_message(session_id, "assistant", answer, citations=citation_data)
-                events.put(("final", {"answer": answer, "citations": citation_data, "tools": [],
-                                      "elapsed_ms": round((time.perf_counter() - started) * 1000)}))
+                if not cancel_event.is_set():
+                    events.put(("final", {"answer": answer, "citations": citation_data, "tools": [],
+                                          "elapsed_ms": round((time.perf_counter() - started) * 1000)}))
         except Exception as exc:
-            events.put(("error", {"message": f"{type(exc).__name__}: {str(exc)[:500]}"}))
+            message = str(exc) if isinstance(exc, LLMError) else "服务处理失败，请检查本地日志后重试。"
+            if not cancel_event.is_set():
+                try:
+                    state.conversations.add_message(session_id, "assistant", f"请求失败：{message}")
+                except Exception:
+                    pass
+                events.put(("error", {"message": message}))
         finally:
             events.put(None)
 

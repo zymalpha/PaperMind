@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from research_assistant.retrieval import BM25Retriever, HybridRetriever, recipro
 from research_assistant.tools import ToolRegistry  # noqa: E402
 from research_assistant.tools import create_tool_registry  # noqa: E402
 from research_assistant.prompts import build_rag_messages  # noqa: E402
+from research_assistant.loaders import LoaderRegistry  # noqa: E402
 
 
 def chunk(identifier: str, content: str) -> Chunk:
@@ -159,6 +161,33 @@ def test_chinese_utf8_strings_are_preserved():
     question = "请计算 123 乘以 456。"
     assert question.encode("utf-8").decode("utf-8") == question
     assert "Transformer" in "请从知识库检索 Transformer 论文。"
+
+
+def test_markdown_long_extension_is_loadable(tmp_path: Path):
+    source = tmp_path / "research.markdown"
+    source.write_text("# 中文论文\n\n可检索的研究内容。", encoding="utf-8")
+    _, pages = LoaderRegistry().load(source)
+    assert pages[0].text.startswith("# 中文论文")
+
+
+def test_agent_honors_cancel_after_inflight_model_call(tmp_path: Path):
+    cancel = threading.Event()
+    executed = []
+
+    class FakeLLM:
+        model = "test"
+        def chat(self, *_args, **_kwargs):
+            cancel.set()  # Models cannot be interrupted mid-call; stop before tools/next round.
+            return type("R", (), {"tool_calls": [{"id": "call", "name": "tool", "arguments": "{}"}],
+                                  "content": "", "usage": {}})()
+
+    registry = ToolRegistry()
+    registry.register("tool", "noop", {"type": "object", "properties": {}}, lambda: executed.append(True))
+    agent = ResearchAgent(FakeLLM(), registry, tmp_path / "memory.sqlite", tmp_path / "tools.jsonl")
+    result = agent.run("stop", "cancel-session", cancel_event=cancel)
+    assert result["cancelled"] is True
+    assert executed == []
+    assert "停止请求" in result["answer"]
 
 
 def test_tool_timeout_is_logged_and_api_keys_are_redacted(tmp_path: Path):

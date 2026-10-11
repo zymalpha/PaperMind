@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from .config import Settings
 from .document_store import DocumentManifest
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .llm import DeepSeekClient
-from .loaders import LoaderRegistry
+from .loaders import LoaderRegistry, calculate_document_id
 from .models import IndexedDocument
 from .rag import RAGEngine
 from .retrieval import BGEReranker, HybridRetriever
@@ -38,15 +39,24 @@ class ResearchAssistantService:
         self.retriever = HybridRetriever(
             self.vector_store, self._reranker, settings.rrf_k, settings.candidate_k
         )
+        self.last_index_timings: dict[str, float] = {}
 
     def index_file(
-        self, source_path: str | Path, copy_to_uploads: bool = True, strategy: str | None = None, force: bool = False
+        self, source_path: str | Path, copy_to_uploads: bool = True, strategy: str | None = None, force: bool = False,
+        metadata: dict | None = None,
     ) -> tuple[IndexedDocument, bool]:
+        started = time.perf_counter()
         source = Path(source_path).resolve()
-        document_id, pages = self.loader.load(source)
+        document_id = calculate_document_id(source)
         existing = self.manifest.get(document_id)
-        if existing and self.vector_store.existing_chunk_ids(document_id) and not force:
+        if existing and self.vector_store.existing_chunk_ids(document_id) and not force and (metadata is None or existing.metadata == metadata):
+            self.last_index_timings = {"hash_and_lookup_ms": round((time.perf_counter() - started) * 1000, 1),
+                                       "total_ms": round((time.perf_counter() - started) * 1000, 1),
+                                       "pages": 0, "chunks": existing.chunk_count, "incremental_skip": True}
             return existing, False
+        parse_started = time.perf_counter()
+        document_id, pages = self.loader.load(source, document_id=document_id)
+        parse_ms = (time.perf_counter() - parse_started) * 1000
 
         target = source
         if copy_to_uploads and source.parent != self.settings.upload_dir.resolve():
@@ -55,14 +65,19 @@ class ResearchAssistantService:
             target = Path(prior.source_path) if prior else self._unique_upload_path(source.name)
             # Index the source before replacing a managed upload. A failed
             # embedding/index operation must not destroy the last working copy.
-            pages = [replace(page, source_path=str(target), source_name=target.name) for page in pages]
+            pages = [replace(page, source_path=str(target), source_name=target.name, metadata={**page.metadata, **(metadata or {})}) for page in pages]
+        elif metadata:
+            pages = [replace(page, metadata={**page.metadata, **metadata}) for page in pages]
 
         selected_strategy = strategy or self.settings.chunk_strategy
         chunker = create_chunker(selected_strategy, self.settings.chunk_size, self.settings.chunk_overlap)
         chunks = chunker.split_pages(pages)
+        chunk_ms = (time.perf_counter() - parse_started) * 1000 - parse_ms
         previous_chunk_ids = self.vector_store.existing_chunk_ids(document_id)
         try:
+            index_started = time.perf_counter()
             self.vector_store.upsert(chunks)
+            index_ms = (time.perf_counter() - index_started) * 1000
         except Exception:
             # Chroma upsert is batched, not transactional. Remove only chunks
             # created by this failed attempt and leave the prior index intact.
@@ -108,8 +123,14 @@ class ResearchAssistantService:
             chunk_count=len(chunks),
             indexed_at=datetime.now(timezone.utc).isoformat(),
             chunk_strategy=selected_strategy,
+            metadata=metadata or {},
         )
         self.manifest.put(document)
+        self.last_index_timings = {"parse_ms": round(parse_ms, 1), "chunk_ms": round(chunk_ms, 1),
+                                   "index_ms": round(index_ms, 1),
+                                   "total_ms": round((time.perf_counter() - started) * 1000, 1),
+                                   "pages": len(pages), "chunks": len(chunks),
+                                   "embedding_batches": getattr(self.vector_store, "last_batch_timings", [])}
         return document, True
 
     def list_documents(self) -> list[IndexedDocument]:
