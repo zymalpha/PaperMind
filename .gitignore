@@ -46,3 +46,12 @@ data/index/backup_*/
 /docs/第三阶段最终验收报告.md
 /docs/论文测试数据清单.md
 /docs/附件功能与索引性能审查.md
+
+# Local submission documents, evaluation artifacts, and isolated runtime indexes.
+/完整提交材料/
+/完整提交材料.zip
+/实习报告及ppt制作参考/
+/实习报告及ppt制作参考.zip
+/答辩PPT整合版.pptx
+/PaperMind生产实习课程详细报告.docx
+data/papermind_eval_*/
